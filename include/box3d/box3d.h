@@ -5,6 +5,7 @@
 
 #include "base.h"
 #include "collision.h"
+#include "fracture.h"
 #include "id.h"
 #include "math_functions.h"
 #include "types.h"

@@ -31,6 +31,8 @@ set(BOX3D_SOURCE_FILES
 	distance.c
 	distance_joint.c
 	dynamic_tree.c
+	fracture.c
+	fracture.h
 	height_field.c
 	hull.c
 	id_pool.c
@@ -95,6 +97,7 @@ set(BOX3D_INCLUDE_FILES
 	../include/box3d/collision.h
 	../include/box3d/config.h
 	../include/box3d/constants.h
+	../include/box3d/fracture.h
 	../include/box3d/id.h
 	../include/box3d/math_functions.h
 	../include/box3d/types.h

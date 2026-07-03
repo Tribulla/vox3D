@@ -258,6 +258,8 @@ typedef struct b3World
 
 	void* userData;
 
+	void* fractureWorld;
+
 	// latest inverse sub-step
 	float inv_h;
 

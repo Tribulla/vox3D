@@ -13,3 +13,4 @@ CMakeUserPresets.json
 .fetchcontent-cache/
 build-dp/
 *.b3rec
+fracturing engine/

@@ -29,6 +29,7 @@ Box3D is a 3D physics engine for games.
 - Joint limits, motors, springs, and friction
 - Joint and contact forces
 - Body movement events and sleep notification
+- Destructible bodies via a built-in stress + fracture subsystem (`box3d/fracture.h`): voxel lattices for arbitrary emergent cracks, or Voronoi-shattered convex hulls (cylinders, rocks, gems) that break along pre-cut seams with no runtime mesh cutting
 
 ### System
 
