@@ -1,4 +1,10 @@
 # Overview {#mainpage}
+
+> **Caution**:
+> The written part of this manual is a work in progress.
+> It will be updated as v1.0 approaches.
+> The reference section should be complete and accurate.
+
 Box3D is a 3D rigid body simulation library for games. Programmers can
 use it in their games to make objects move in realistic ways and make
 the game world more interactive. From the game engine's point of view,
@@ -14,6 +20,7 @@ engine begin with the `b3` prefix. Hopefully this is sufficient to avoid
 name clashing with your application.
 
 ## Prerequisites
+
 In this manual I'll assume you are familiar with basic physics
 concepts, such as mass, force, torque, and impulses. If not, please
 first consult Google search and Wikipedia.
@@ -33,6 +40,7 @@ should be comfortable with compiling, linking, and debugging.
 > Box3D. There are many resources for this online.
 
 ## Scope
+
 This manual covers the majority of the Box3D API. However, not every
 aspect is covered. Please look at the Reference section and samples
 application included with Box3D to learn more.
@@ -45,6 +53,7 @@ Box3D may be out of sync with this manual.
 > latest version on the main branch.
 
 ## Feedback and Bugs
+
 Please file bugs and feature requests here:
 [Box3D Issues](https://github.com/erincatto/box3d/issues)
 
@@ -130,6 +139,7 @@ the first time of impact (TOI). Second, speculative collision is used to create
 contact constraints between bodies before they touch.
 
 ### events
+
 World simulation leads to the creation of events that are available at the end
 of the time step:
 
@@ -141,6 +151,7 @@ of the time step:
 These events allow your application to react to changes in the simulation.
 
 ## Modules
+
 Box3D's primary purpose is to provide rigid body simulation. However,
 there are math and collision features that may be useful apart from the
 rigid body simulation. These are provided in the `include` directory. Anything
@@ -153,6 +164,7 @@ study the code and ask questions. I'm happy to share all the details of how
 Box3D works internally.
 
 ## Units
+
 Box3D works with floating point numbers and tolerances have to be used
 to make Box3D perform well. These tolerances have been tuned to work
 well with meters-kilogram-second (MKS) units. In particular, Box3D has
@@ -185,6 +197,7 @@ the full 3D rotation is tracked continuously.
 > Box3D uses radians, not degrees.
 
 ## Changing the length units
+
 Advanced users may change the length unit by calling `b3SetLengthUnitsPerMeter()`
 at application startup. If you keep Box3D in a shared library, you will need
 to call this if the shared library is reloaded.
@@ -195,6 +208,7 @@ One of the benefits of using MKS units for physics simulation is that you can
 use real world values to get reasonable results.
 
 ## Ids and Definitions
+
 Fast memory management plays a central role in the design of the Box3D
 interface. When you create a world, body, shape or joint, you will receive
 a handle called an *id*. These ids are opaque and are passed to various functions

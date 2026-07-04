@@ -373,6 +373,7 @@ static void OnFrame( void )
 	// frame tracks load/unload without extra wiring. Live samples sit at 1 unit per
 	// meter, leaving the transform identity.
 	camera.SetRenderTransform( b3GetLengthUnitsPerMeter(), s_context.viewZUp );
+	camera.SetDrawDistance( s_context.drawDistance );
 
 	// Sync the draw origin to the camera eye once per frame, before any drawing. This must hold even
 	// for samples that drive their own Step without calling Sample::Step. Render re-syncs after Step
@@ -451,6 +452,25 @@ static void OnCleanup( void )
 	exit( errors == 0 ? 0 : 1 );
 }
 
+static void OnAppLog( const char* tag, uint32_t logLevel, uint32_t logItemId, const char* message, uint32_t lineNumber,
+					  const char* filename, void* userData )
+{
+	(void)tag;
+	(void)logItemId;
+	(void)filename;
+	(void)userData;
+	(void)lineNumber;
+
+	const char* level = ( logLevel == 0 ) ? "panic" : ( logLevel == 1 ) ? "error" : ( logLevel == 2 ) ? "warn" : "info";
+	fprintf( stderr, "sokol(level %s) %s\n", level, message ? message : "(no message)" );
+
+	if ( logLevel == 0 )
+	{
+		fprintf( stderr, "Ensure you have OpenGL 4.5 if on Linux" );
+		exit( 1 );
+	}
+}
+
 sapp_desc sokol_main( int argc, char** argv )
 {
 	for ( int i = 1; i < argc; ++i )
@@ -463,6 +483,16 @@ sapp_desc sokol_main( int argc, char** argv )
 		{
 			s_sampleOverride = atoi( argv[++i] );
 		}
+		else if ( strcmp( argv[i], "--replay" ) == 0 && i + 1 < argc )
+		{
+			const char* path = argv[++i];
+
+			if ( g_replayIndex >= 0 )
+			{
+				snprintf( s_context.replayFile, sizeof( s_context.replayFile ), "%s", path );
+				s_sampleOverride = g_replayIndex;
+			}
+		}
 	}
 
 	sapp_desc desc{};
@@ -470,6 +500,7 @@ sapp_desc sokol_main( int argc, char** argv )
 	desc.frame_cb = OnFrame;
 	desc.event_cb = OnEvent;
 	desc.cleanup_cb = OnCleanup;
+	desc.logger.func = OnAppLog;
 
 	// GL 4.5 for glClipControl (reverse-Z). Ignored on D3D11 / Metal.
 	desc.gl.major_version = 4;

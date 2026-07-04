@@ -72,7 +72,7 @@ if (MSVC OR APPLE OR UNIX)
 			endif()
 		endif()
 	else()
-		if(MSVC)
+		if(MSVC AND CMAKE_CXX_COMPILER_ID STREQUAL "MSVC" AND PROJECT_IS_TOP_LEVEL)
 			# enable hot reloading
 			add_compile_options("$<$<CONFIG:Debug>:/ZI>")
 			add_link_options("$<$<CONFIG:Debug>:/INCREMENTAL>")
@@ -89,6 +89,25 @@ endif()
 option(BOX3D_DISABLE_SIMD "Disable SIMD math (slower)" OFF)
 option(BOX3D_COMPILE_WARNING_AS_ERROR "Compile warnings as errors" OFF)
 option(BOX3D_DOUBLE_PRECISION "Enable double precision for large worlds" OFF)
+
+# Emscripten maps the SSE2 path onto wasm SIMD128. simd.h is a header included by
+# non-library targets like the tests, so these flags must be directory-wide, not
+# PRIVATE to the box3d library.
+if (EMSCRIPTEN AND NOT BOX3D_DISABLE_SIMD)
+	add_compile_options(-msimd128 -msse2)
+endif()
+
+# Emscripten pthread support. Must precede add_subdirectory(src) so the box3d library
+# objects are built with the same atomics/bulk-memory features as the executables that
+# link them, otherwise wasm-ld rejects --shared-memory. Top level only, so a FetchContent
+# consumer keeps control of its own threading model.
+if (EMSCRIPTEN AND PROJECT_IS_TOP_LEVEL)
+	set(EMSCRIPTEN_PTHREADS_COMPILER_FLAGS "-pthread -s USE_PTHREADS=1")
+	set(EMSCRIPTEN_PTHREADS_LINKER_FLAGS "${EMSCRIPTEN_PTHREADS_COMPILER_FLAGS} -s ALLOW_MEMORY_GROWTH")
+	string(APPEND CMAKE_C_FLAGS " ${EMSCRIPTEN_PTHREADS_COMPILER_FLAGS}")
+	string(APPEND CMAKE_CXX_FLAGS " ${EMSCRIPTEN_PTHREADS_COMPILER_FLAGS}")
+	string(APPEND CMAKE_EXE_LINKER_FLAGS " ${EMSCRIPTEN_PTHREADS_LINKER_FLAGS}")
+endif()
 
 set(CMAKE_EXPORT_COMPILE_COMMANDS ON)
 set_property(GLOBAL PROPERTY USE_FOLDERS ON)
@@ -123,16 +142,6 @@ if(PROJECT_IS_TOP_LEVEL)
 	option(BOX3D_BUILD_SHADERS "Recompile shaders with sokol-shdc" OFF)
 
 	if(BOX3D_UNIT_TESTS OR BOX3D_SAMPLES OR BOX3D_BENCHMARKS)
-
-		# Emscripten pthread support
-		if(EMSCRIPTEN)
-			set(EMSCRIPTEN_PTHREADS_COMPILER_FLAGS "-pthread -s USE_PTHREADS=1")
-			set(EMSCRIPTEN_PTHREADS_LINKER_FLAGS "${EMSCRIPTEN_PTHREADS_COMPILER_FLAGS} -s ALLOW_MEMORY_GROWTH")
-			string(APPEND CMAKE_C_FLAGS " ${EMSCRIPTEN_PTHREADS_COMPILER_FLAGS}")
-			string(APPEND CMAKE_CXX_FLAGS " ${EMSCRIPTEN_PTHREADS_COMPILER_FLAGS}")
-			string(APPEND CMAKE_EXE_LINKER_FLAGS " ${EMSCRIPTEN_PTHREADS_LINKER_FLAGS}")
-		endif()
-
 		add_subdirectory(shared)
 	endif()
 

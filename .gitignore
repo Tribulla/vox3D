@@ -11,6 +11,5 @@ CMakeUserPresets.json
 .claude/
 .tmp/
 .fetchcontent-cache/
-build-dp/
 *.b3rec
 fracturing engine/

@@ -563,6 +563,10 @@ static void b3SolveContinuous( b3World* world, int bodySimIndex, b3TaskContext* 
 		fastBodySim->rotation0 = q;
 		fastBodySim->center0 = center;
 
+		// The move event was written before CCD, so correct it with the impact pose
+		b3BodyMoveEvent* event = b3Array_Get( world->bodyMoveEvents, bodySimIndex );
+		event->transform = fastBodySim->transform;
+
 		// Prepare AABBs for broad-phase.
 		// Even though a body is fast, it may not move much. So the AABB may not need enlargement.
 
@@ -728,6 +732,10 @@ static void b3FinalizeBodiesTask( int startIndex, int endIndex, int workerIndex,
 		// reset applied force and torque
 		sim->force = b3Vec3_zero;
 		sim->torque = b3Vec3_zero;
+
+		// If you hit this then it means you deferred mass computation but never called b3Body_ApplyMassFromShapes
+		// or b3Body_SetMassData.
+		B3_ASSERT( ( body->flags & b3_dirtyMass ) == 0 );
 
 		body->flags &= ~b3_bodyTransientFlags;
 		body->flags |= ( sim->flags & ( b3_isSpeedCapped | b3_hadTimeOfImpact ) );

@@ -42,106 +42,6 @@ struct Ray
 	b3Vec3 origin, translation;
 };
 
-#ifdef _WIN32
-
-#include <immintrin.h>
-
-// Warning: this code has not been validated
-void ClosestPointAVX2( const float* aabbMinX, const float* aabbMinY, const float* aabbMinZ, const float* aabbMaxX,
-					   const float* aabbMaxY, const float* aabbMaxZ, int proxyCount, b3Vec3 point, b3Vec3* outClosestPoint,
-					   float* outMinDistSq )
-{
-	const __m256 px = _mm256_set1_ps( point.x );
-	const __m256 py = _mm256_set1_ps( point.y );
-	const __m256 pz = _mm256_set1_ps( point.z );
-
-	__m256 bestDistSq = _mm256_set1_ps( FLT_MAX );
-	__m256i bestIndex = _mm256_set1_epi32( -1 );
-
-	int j = 0;
-	for ( ; j + 8 <= proxyCount; j += 8 )
-	{
-		// Load AABB bounds for 8 proxies
-		__m256 minX = _mm256_loadu_ps( aabbMinX + j );
-		__m256 minY = _mm256_loadu_ps( aabbMinY + j );
-		__m256 minZ = _mm256_loadu_ps( aabbMinZ + j );
-		__m256 maxX = _mm256_loadu_ps( aabbMaxX + j );
-		__m256 maxY = _mm256_loadu_ps( aabbMaxY + j );
-		__m256 maxZ = _mm256_loadu_ps( aabbMaxZ + j );
-
-		// Closest point on AABB to point: clamp each coordinate
-		__m256 cx = _mm256_min_ps( _mm256_max_ps( px, minX ), maxX );
-		__m256 cy = _mm256_min_ps( _mm256_max_ps( py, minY ), maxY );
-		__m256 cz = _mm256_min_ps( _mm256_max_ps( pz, minZ ), maxZ );
-
-		// d = point - closest
-		__m256 dx = _mm256_sub_ps( px, cx );
-		__m256 dy = _mm256_sub_ps( py, cy );
-		__m256 dz = _mm256_sub_ps( pz, cz );
-
-		__m256 dx2 = _mm256_mul_ps( dx, dx );
-		__m256 dy2 = _mm256_mul_ps( dy, dy );
-		__m256 dz2 = _mm256_mul_ps( dz, dz );
-		__m256 distSq = _mm256_add_ps( _mm256_add_ps( dx2, dy2 ), dz2 );
-
-		// Compare to current best
-		__m256 mask = _mm256_cmp_ps( distSq, bestDistSq, _CMP_LT_OQ );
-		bestDistSq = _mm256_blendv_ps( bestDistSq, distSq, mask );
-
-		__m256i indices = _mm256_set_epi32( j + 7, j + 6, j + 5, j + 4, j + 3, j + 2, j + 1, j + 0 );
-
-		// Tracks the 8 best indices
-		bestIndex =
-			_mm256_castps_si256( _mm256_blendv_ps( _mm256_castsi256_ps( bestIndex ), _mm256_castsi256_ps( indices ), mask ) );
-	}
-
-	// Now find the best index among the best 8.
-	alignas( 32 ) float distBuf[8];
-	alignas( 32 ) int indexBuf[8];
-
-	_mm256_store_ps( distBuf, bestDistSq );
-	_mm256_store_si256( (__m256i*)indexBuf, bestIndex );
-
-	float minDist = distBuf[0];
-	int minIdx = indexBuf[0];
-	for ( int k = 1; k < 8; ++k )
-	{
-		if ( distBuf[k] < minDist )
-		{
-			minDist = distBuf[k];
-			minIdx = indexBuf[k];
-		}
-	}
-
-	// Remainder
-	for ( ; j < proxyCount; ++j )
-	{
-		float cx = b3MinFloat( b3MaxFloat( point.x, aabbMinX[j] ), aabbMaxX[j] );
-		float cy = b3MinFloat( b3MaxFloat( point.y, aabbMinY[j] ), aabbMaxY[j] );
-		float cz = b3MinFloat( b3MaxFloat( point.z, aabbMinZ[j] ), aabbMaxZ[j] );
-
-		float dx = point.x - cx;
-		float dy = point.y - cy;
-		float dz = point.z - cz;
-		float d2 = dx * dx + dy * dy + dz * dz;
-
-		if ( d2 < minDist )
-		{
-			minDist = d2;
-			minIdx = j;
-		}
-	}
-
-	b3Vec3 cp;
-	cp.x = b3MinFloat( b3MaxFloat( point.x, aabbMinX[minIdx] ), aabbMaxX[minIdx] );
-	cp.y = b3MinFloat( b3MaxFloat( point.y, aabbMinY[minIdx] ), aabbMaxY[minIdx] );
-	cp.z = b3MinFloat( b3MaxFloat( point.z, aabbMinZ[minIdx] ), aabbMaxZ[minIdx] );
-
-	*outClosestPoint = cp;
-	*outMinDistSq = minDist;
-}
-#endif
-
 class TreeBenchmark : public Sample
 {
 public:
@@ -178,28 +78,12 @@ public:
 		m_height = 0;
 		m_tree = {};
 
-		m_aabbMinX = nullptr;
-		m_aabbMinY = nullptr;
-		m_aabbMinZ = nullptr;
-		m_aabbMaxX = nullptr;
-		m_aabbMaxY = nullptr;
-		m_aabbMaxZ = nullptr;
-
 		CreateTree();
 	}
 
 	~TreeBenchmark() override
 	{
 		b3DynamicTree_Destroy( &m_tree );
-
-#ifdef _WIN32
-		_aligned_free( m_aabbMinX );
-		_aligned_free( m_aabbMinY );
-		_aligned_free( m_aabbMinZ );
-		_aligned_free( m_aabbMaxX );
-		_aligned_free( m_aabbMaxY );
-		_aligned_free( m_aabbMaxZ );
-#endif
 	}
 
 	// Breath-first search to compute node depth values start with 0 at the root.
@@ -254,15 +138,6 @@ public:
 		}
 
 		m_proxies.clear();
-
-#ifdef _WIN32
-		_aligned_free( m_aabbMinX );
-		_aligned_free( m_aabbMinY );
-		_aligned_free( m_aabbMinZ );
-		_aligned_free( m_aabbMaxX );
-		_aligned_free( m_aabbMaxY );
-		_aligned_free( m_aabbMaxZ );
-#endif
 
 		m_tree = b3DynamicTree_Create( 512 );
 
@@ -342,29 +217,6 @@ public:
 			// }
 		}
 
-#ifdef _WIN32
-		int proxyCount = m_proxies.size();
-		m_aabbMinX = (float*)_aligned_malloc( proxyCount * sizeof( float ), 32 );
-		m_aabbMinY = (float*)_aligned_malloc( proxyCount * sizeof( float ), 32 );
-		m_aabbMinZ = (float*)_aligned_malloc( proxyCount * sizeof( float ), 32 );
-		m_aabbMaxX = (float*)_aligned_malloc( proxyCount * sizeof( float ), 32 );
-		m_aabbMaxY = (float*)_aligned_malloc( proxyCount * sizeof( float ), 32 );
-		m_aabbMaxZ = (float*)_aligned_malloc( proxyCount * sizeof( float ), 32 );
-
-		for ( int i = 0; i < proxyCount; ++i )
-		{
-			b3Vec3 lb = m_proxies[i].aabb.lowerBound;
-			b3Vec3 ub = m_proxies[i].aabb.upperBound;
-
-			m_aabbMinX[i] = lb.x;
-			m_aabbMinY[i] = lb.y;
-			m_aabbMinZ[i] = lb.z;
-			m_aabbMaxX[i] = ub.x;
-			m_aabbMaxY[i] = ub.y;
-			m_aabbMaxZ[i] = ub.z;
-		}
-#endif
-
 		printf( "max index = %d\n", maxAreaIndex );
 
 		// constexpr int n = m_isDebug ? 1000 : INT_MAX;
@@ -398,15 +250,6 @@ public:
 		}
 
 		m_proxies.clear();
-
-#ifdef _WIN32
-		_aligned_free( m_aabbMinX );
-		_aligned_free( m_aabbMinY );
-		_aligned_free( m_aabbMinZ );
-		_aligned_free( m_aabbMaxX );
-		_aligned_free( m_aabbMaxY );
-		_aligned_free( m_aabbMaxZ );
-#endif
 
 		{
 			//bool zUp = true;
@@ -443,29 +286,6 @@ public:
 			proxy.proxyId = i;
 			m_proxies[node->userData] = proxy;
 		}
-
-#ifdef _WIN32
-		int proxyCount = m_proxies.size();
-		m_aabbMinX = (float*)_aligned_malloc( proxyCount * sizeof( float ), 32 );
-		m_aabbMinY = (float*)_aligned_malloc( proxyCount * sizeof( float ), 32 );
-		m_aabbMinZ = (float*)_aligned_malloc( proxyCount * sizeof( float ), 32 );
-		m_aabbMaxX = (float*)_aligned_malloc( proxyCount * sizeof( float ), 32 );
-		m_aabbMaxY = (float*)_aligned_malloc( proxyCount * sizeof( float ), 32 );
-		m_aabbMaxZ = (float*)_aligned_malloc( proxyCount * sizeof( float ), 32 );
-
-		for ( int i = 0; i < proxyCount; ++i )
-		{
-			b3Vec3 lb = m_proxies[i].aabb.lowerBound;
-			b3Vec3 ub = m_proxies[i].aabb.upperBound;
-
-			m_aabbMinX[i] = lb.x;
-			m_aabbMinY[i] = lb.y;
-			m_aabbMinZ[i] = lb.z;
-			m_aabbMaxX[i] = ub.x;
-			m_aabbMaxY[i] = ub.y;
-			m_aabbMaxZ[i] = ub.z;
-		}
-#endif
 
 		printf( "max index = %d\n", maxAreaIndex );
 
@@ -565,42 +385,6 @@ public:
 		}
 		m_overlapTime = b3GetMilliseconds( ticks );
 
-#if 0 && defined( _WIN32 )
-		// brute force avx2
-		int proxyCount = (int)m_proxies.size();
-		for ( int i = 0; i < m_testCount; ++i )
-		{
-			b3Vec3 point = m_closestPointQueries[i].center;
-			float minDistSq;
-			b3Vec3 closest;
-
-			ClosestPointAVX2( m_aabbMinX, m_aabbMinY, m_aabbMinZ, m_aabbMaxX, m_aabbMaxY, m_aabbMaxZ, proxyCount, point, &closest,
-								   &minDistSq );
-
-			m_closestPoint = closest;
-			m_haveClosest = true;
-		}
-#elif 0
-		// Brute force
-		int proxyCount = (int)m_proxies.size();
-		for ( int i = 0; i < m_testCount; ++i )
-		{
-			b3Vec3 point = m_closestPointQueries[i].center;
-			float minDistanceSquared = FLT_MAX;
-			m_haveClosest = false;
-			for ( int j = 0; j < proxyCount; ++j )
-			{
-				b3Vec3 closestPoint = b3ClosestPointToAABB( point, m_proxies[j].aabb );
-				float d = b3DistanceSquared( point, closestPoint );
-				if ( d < minDistanceSquared )
-				{
-					m_closestPoint = closestPoint;
-					m_haveClosest = true;
-					minDistanceSquared = d;
-				}
-			}
-		}
-#else
 		for ( int i = 0; i < m_testCount; ++i )
 		{
 			b3Vec3 point = m_closestPointQueries[i].center;
@@ -611,7 +395,7 @@ public:
 			b3DynamicTree_QueryClosest( &m_tree, point, B3_DEFAULT_MASK_BITS, false, ClosetPointCallback, this,
 										&distanceSquared );
 		}
-#endif
+
 		m_closestTime = b3GetMilliseconds( ticks );
 	}
 
@@ -811,13 +595,6 @@ public:
 	const char* m_fileNames[m_fileCount];
 	FileConfig m_config[m_fileCount];
 	int m_fileIndex;
-
-	float* m_aabbMinX;
-	float* m_aabbMinY;
-	float* m_aabbMinZ;
-	float* m_aabbMaxX;
-	float* m_aabbMaxY;
-	float* m_aabbMaxZ;
 
 	std::unordered_map<uint64_t, Proxy> m_proxies;
 	std::vector<uint16_t> m_depths;

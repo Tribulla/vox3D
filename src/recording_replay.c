@@ -2088,6 +2088,7 @@ static int b3RecDispatchOne( b3RecReader* rdr )
 	{
 		return -1;
 	}
+
 	int payloadStart = rdr->cursor;
 
 	switch ( opcode )
@@ -2651,6 +2652,7 @@ static void b3RecPlayerRestoreKeyframe( b3RecPlayer* player, const b3RecKeyframe
 	player->frame = kf->frame;
 	player->divergeFrame = kf->divergeFrame;
 	player->atEnd = false;
+	player->atPreStep = false;
 
 	// Restore the outliner list verbatim so ordinals match this frame.
 	b3RecGrow( (void**)&player->bodyIds, &player->bodyIdCap, kf->bodyIdCount, 0, (int)sizeof( b3BodyId ) );
@@ -2750,6 +2752,7 @@ b3RecPlayer* b3RecPlayer_Create( const void* data, int size, int workerCount )
 	player->recordedSubStepCount = 0;
 	player->recordedWorkerCount = workerCount;
 	player->atEnd = false;
+	player->atPreStep = false;
 	player->divergeFrame = -1;
 	player->keyframeMinInterval = B3_REC_KEYFRAME_INTERVAL_DEFAULT;
 	player->keyframeInterval = B3_REC_KEYFRAME_INTERVAL_DEFAULT;
@@ -2914,6 +2917,9 @@ void b3RecPlayer_Destroy( b3RecPlayer* player )
 
 bool b3RecPlayer_StepFrame( b3RecPlayer* player )
 {
+	// This is never true when full stepping
+	player->atPreStep = false;
+
 	if ( player->atEnd )
 	{
 		return false;
@@ -2975,6 +2981,91 @@ bool b3RecPlayer_StepFrame( b3RecPlayer* player )
 	}
 }
 
+void b3RecPlayer_SubStepFrame( b3RecPlayer* player )
+{
+	if ( player->atEnd )
+	{
+		return;
+	}
+
+	// Reset the per-frame query store before this frame's records are dispatched.
+	if ( player->atPreStep == false )
+	{
+		player->frameQueryCount = 0;
+		player->frameHitCount = 0;
+	}
+
+	// A frame is its leading inputs (queries and between-step mutators), one Step, and the Step's
+	// trailing StateHash. Queries are recorded before the Step they belong to, so they stash here
+	// against the world state they were computed for.
+	bool stepped = false;
+	bool haveCreateBodyOp = false;
+	for ( ;; )
+	{
+		if ( player->rdr.cursor >= player->registryEnd || !player->rdr.ok )
+		{
+			player->atEnd = true;
+			player->atPreStep = false;
+			return;
+		}
+
+		// Once stepped, the StateHash is the only record still belonging to this frame. Anything else
+		// begins the next frame, so stop and let the next StepFrame consume it. Capture a keyframe at
+		// the boundary.
+		uint8_t currentOpCode = player->rdr.data[player->rdr.cursor];
+		if ( stepped && currentOpCode != b3_recOpStateHash )
+		{
+			if ( player->frame > player->lastKeyframeFrame && player->frame % player->keyframeInterval == 0 )
+			{
+				b3RecCaptureKeyframe( player );
+			}
+			return;
+		}
+
+		if ( player->atPreStep == false && haveCreateBodyOp == true && currentOpCode == b3_recOpStep )
+		{
+			player->atPreStep = true;
+			return;
+		}
+
+		int op = b3RecDispatchOne( &player->rdr );
+		if ( op < 0 )
+		{
+			player->atEnd = true;
+			player->atPreStep = false;
+			return;
+		}
+		if ( op == b3_recOpDestroyWorld ) // end of recording
+		{
+			player->atEnd = true;
+			player->atPreStep = false;
+			return;
+		}
+
+		if ( op == b3_recOpCreateBody )
+		{
+			B3_ASSERT( player->atPreStep == false );
+			haveCreateBodyOp = true;
+		}
+
+		if ( op == b3_recOpStep )
+		{
+			player->atPreStep = false;
+			player->frame += 1;
+			stepped = true;
+		}
+		else if ( op == b3_recOpStateHash ) // trailing record of the frame just stepped
+		{
+			// Latch the first frame whose state hash diverged. The hash belongs to the frame Step just
+			// advanced, so latch against the current frame, not the next Step which would be one late.
+			if ( player->divergeFrame < 0 && player->rdr.diverged )
+			{
+				player->divergeFrame = player->frame;
+			}
+		}
+	}
+}
+
 void b3RecPlayer_Restart( b3RecPlayer* player )
 {
 	// Restore the frame-0 image in place so the replay world id stays stable across a restart or
@@ -2991,6 +3082,7 @@ void b3RecPlayer_Restart( b3RecPlayer* player )
 	player->frame = 0;
 	player->divergeFrame = -1;
 	player->atEnd = false;
+	player->atPreStep = false;
 
 	// Frame 0 is the pre-step snapshot with no recorded queries, so clear the per-frame store. This
 	// keeps the last stepped frame's queries from lingering on a restart or a backward scrub to 0.
@@ -3008,6 +3100,8 @@ void b3RecPlayer_Restart( b3RecPlayer* player )
 
 void b3RecPlayer_SeekFrame( b3RecPlayer* player, int targetFrame )
 {
+	player->atPreStep = false;
+
 	if ( player == NULL )
 	{
 		return;
@@ -3069,6 +3163,11 @@ int b3RecPlayer_GetFrameCount( const b3RecPlayer* player )
 bool b3RecPlayer_IsAtEnd( const b3RecPlayer* player )
 {
 	return player != NULL ? player->atEnd : true;
+}
+
+bool b3RecPlayer_IsAtPreStep( const b3RecPlayer* player )
+{
+	return player != NULL ? player->atPreStep : false;
 }
 
 bool b3RecPlayer_HasDiverged( const b3RecPlayer* player )
@@ -3315,7 +3414,7 @@ void b3RecPlayer_DrawFrameQueries( b3RecPlayer* player, b3DebugDraw* draw, int q
 			{
 				b3Pos c1 = b3OffsetPos( q->origin, q->mover.center1 );
 				b3Pos c2 = b3OffsetPos( q->origin, q->mover.center2 );
-				b3HexColor c = q->kind == b3_colorLightSkyBlue;
+				b3HexColor c = b3_colorLightSkyBlue;
 				if ( draw->DrawCapsuleFcn )
 				{
 					draw->DrawCapsuleFcn( c1, c2, q->mover.radius, b3RecQuerySelColor( selected, c ), 0.6f, draw->context );
@@ -3335,7 +3434,7 @@ void b3RecPlayer_DrawFrameQueries( b3RecPlayer* player, b3DebugDraw* draw, int q
 			{
 				b3Pos c1 = b3OffsetPos( q->origin, q->mover.center1 );
 				b3Pos c2 = b3OffsetPos( q->origin, q->mover.center2 );
-				b3HexColor c = q->kind == b3_colorTan;
+				b3HexColor c = b3_colorTan;
 				if ( draw->DrawCapsuleFcn )
 				{
 					draw->DrawCapsuleFcn( c1, c2, q->mover.radius, b3RecQuerySelColor( selected, c ), 0.6f, draw->context );

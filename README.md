@@ -1,12 +1,13 @@
 # Box3D
 
+[![Build Status](https://github.com/erincatto/box3d/actions/workflows/build.yml/badge.svg)](https://github.com/erincatto/box3d/actions)
+[![CLA assistant](https://cla-assistant.io/readme/badge/erincatto/box3d)](https://cla-assistant.io/erincatto/box3d)
+
 ![Box3D Logo](https://box2d.org/images/logo.svg)
 
 Box3D is a 3D physics engine for games.
 
-## Build status
-
-[![Build Status](https://github.com/erincatto/box3d/actions/workflows/build.yml/badge.svg)](https://github.com/erincatto/box3d/actions)
+[![Introducing Box3D](https://img.youtube.com/vi/jr_Fzl2XwKU/maxresdefault.jpg)](https://www.youtube.com/watch?v=jr_Fzl2XwKU)
 
 ## Features
 
@@ -19,13 +20,14 @@ Box3D is a 3D physics engine for games.
 - Collision filtering
 - Ray casts, shape casts, and overlap queries
 - Sensor system
+- Character mover
 
 ### Physics
 
 - Robust _Soft Step_ rigid body solver
 - Continuous physics for fast translations and rotations
 - Island based sleep
-- Revolute, prismatic, distance, mouse joint, weld, and wheel joints
+- Revolute, prismatic, distance, motor, weld, and wheel joints
 - Joint limits, motors, springs, and friction
 - Joint and contact forces
 - Body movement events and sleep notification
@@ -37,12 +39,14 @@ Box3D is a 3D physics engine for games.
 - Written in portable C17
 - Extensive multithreading and SIMD
 - Optimized for large piles of bodies
+- Cross platform determinism
+- Recording and replay
 
 ### Samples
 
-- Uses sokol to run with D3D11 on Window, Metal on macOS, and OpenGL 4.3 on Linux
-- Graphical user interface with imgui
-- Many samples to demonstrate features and performance
+- Uses sokol to run with D3D11 on Windows, Metal on macOS, and OpenGL 4.5 on Linux.
+- Graphical user interface with imgui.
+- Many samples to demonstrate features and performance.
 
 ## Building all platforms
 
@@ -52,7 +56,7 @@ Box3D is a 3D physics engine for games.
 
 ## Building with CMake presets (recommended)
 
-The presets in `CMakePresets.json` give one build flow on every platform and are picked up automatically by Visual Studio, VS Code, and CLion (open the folder and choose a preset). From the command line:
+This uses the presets in `CMakePresets.json`.
 
 - Windows: `cmake --preset windows` then `cmake --build --preset windows-release`
 - Linux: `cmake --preset linux-release` then `cmake --build --preset linux-release`
@@ -84,6 +88,14 @@ Run the samples app (must be in the Box3D directory).
 - Select the samples scheme
 - Build and run the samples
 
+## Building for Web
+
+- [Emscripten SDK](https://emscripten.org/docs/getting_started/downloads.html)
+- `emcmake cmake -B build -DBOX3D_SAMPLES=OFF`
+- `cmake --build build`
+
+Box3D uses SSE2 with WebAssembly. Define `BOX3D_DISABLE_SIMD` to disable SSE2.
+
 ## Building and installing
 
 - mkdir build
@@ -95,10 +107,9 @@ Run the samples app (must be in the Box3D directory).
 ## Using Box3D in your project
 
 The core library has no dependencies beyond the C runtime (and `libm` on Unix). Linking it
-gives you the `box3d::box3d` target. When Box3D is consumed as a subproject it builds the
-library only; samples, tests, and benchmarks are skipped.
+gives you the `box3d::box3d` target.
 
-The recommended path is FetchContent, which pins a tag and needs no separate install step:
+I recommend to use FetchContent:
 
 ```cmake
 include(FetchContent)
@@ -136,7 +147,7 @@ You will need a compiler that supports C17 to build the Box3D library.
 
 You will need a compiler that supports C++20 to build the samples.
 
-Box3D uses SSE2 and Neon SIMD math to improve performance. This can be disabled by defining `BOX3D_DISABLE_SIMD`.
+Box3D uses SSE2 and Neon SIMD math to improve performance. SIMD can be disabled by defining `BOX3D_DISABLE_SIMD`.
 
 ## Documentation
 
@@ -148,7 +159,7 @@ The user manual lives in [`docs/`](docs/) and is built with Doxygen. Enable the 
 
 ## Contributing
 
-Please do not submit pull requests. Instead, please file an issue for bugs or feature requests. For support, please visit the Discord server.
+Pull requests are currently disabled. Instead, please file an issue for bugs or feature requests. For support, please visit the Discord server.
 
 ## Giving feedback
 
@@ -163,3 +174,16 @@ Box3D is developed by Erin Catto and uses the [MIT license](https://en.wikipedia
 Support development of Box3D through [Github Sponsors](https://github.com/sponsors/erincatto).
 
 Please consider starring this repository and subscribing to my [YouTube channel](https://www.youtube.com/@erin_catto).
+
+## LLM Usage
+
+LLMs are used in the following areas:
+
+- unit tests
+- samples app
+- migrating code between Box2D and Box3D
+- build configuration
+- code reviews
+- benchmarking
+
+Elsewhere all code is developed and written by me. I take responsibility for every line of code in Box2D/3D.

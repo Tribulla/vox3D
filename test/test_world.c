@@ -681,7 +681,7 @@ static int TestMeshDrop( void )
 		b3World_Step( worldId, timeStep, subStepCount );
 
 		b3BodyEvents events = b3World_GetBodyEvents( worldId );
-		if (events.moveCount == 0)
+		if ( events.moveCount == 0 )
 		{
 			// All bodies sleeping
 			break;
@@ -995,6 +995,77 @@ static int TestExplosion( void )
 	return 0;
 }
 
+// Ensure correct move events from bodies involved in CCD.
+static int TestContinuousMoveEvent( void )
+{
+	b3WorldDef worldDef = b3DefaultWorldDef();
+	b3WorldId worldId = b3CreateWorld( &worldDef );
+	b3World_EnableContinuous( worldId, true );
+
+	// Thin static wall, near face at x = 0.1
+	b3BodyDef bodyDef = b3DefaultBodyDef();
+	bodyDef.type = b3_staticBody;
+	bodyDef.position = (b3Pos){ 0.0f, 0.0f, 0.0f };
+	b3BodyId wallId = b3CreateBody( worldId, &bodyDef );
+	b3BoxHull wallBox = b3MakeBoxHull( 0.1f, 5.0f, 5.0f );
+	b3ShapeDef shapeDef = b3DefaultShapeDef();
+	b3CreateHullShape( wallId, &shapeDef, &wallBox.base );
+
+	// Fast dynamic sphere fired at the wall.
+	bodyDef = b3DefaultBodyDef();
+	bodyDef.type = b3_dynamicBody;
+	bodyDef.gravityScale = 0.0f;
+	bodyDef.position = (b3Pos){ 3.0f, 0.0f, 0.0f };
+	bodyDef.linearVelocity = (b3Vec3){ -30.0f, 0.0f, 0.0f };
+	b3BodyId ballId = b3CreateBody( worldId, &bodyDef );
+	shapeDef = b3DefaultShapeDef();
+	shapeDef.density = 1.0f;
+	b3Sphere sphere = { { 0.0f, 0.0f, 0.0f }, 0.25f };
+	b3CreateSphereShape( ballId, &shapeDef, &sphere );
+
+	float timeStep = 1.0f / 60.0f;
+	int subStepCount = 4;
+	bool haveMove = false;
+
+	for ( int step = 0; step < 30; ++step )
+	{
+		b3World_Step( worldId, timeStep, subStepCount );
+
+		b3WorldTransform xf = b3Body_GetTransform( ballId );
+
+		b3BodyEvents events = b3World_GetBodyEvents( worldId );
+		for ( int i = 0; i < events.moveCount; ++i )
+		{
+			b3BodyMoveEvent* event = events.moveEvents + i;
+			if ( B3_ID_EQUALS( event->bodyId, ballId ) == false )
+			{
+				continue;
+			}
+
+			haveMove = true;
+
+			// The move event must carry the same pose the body reports, CCD rewind included
+			ENSURE( event->transform.p.x == xf.p.x );
+			ENSURE( event->transform.p.y == xf.p.y );
+			ENSURE( event->transform.p.z == xf.p.z );
+			ENSURE( event->transform.q.v.x == xf.q.v.x );
+			ENSURE( event->transform.q.v.y == xf.q.v.y );
+			ENSURE( event->transform.q.v.z == xf.q.v.z );
+			ENSURE( event->transform.q.s == xf.q.s );
+		}
+	}
+
+	ENSURE( haveMove == true );
+
+	// Tunnel check
+	b3Pos finalPos = b3Body_GetPosition( ballId );
+	ENSURE( 0.2f < finalPos.x && finalPos.x < 0.8f );
+
+	b3DestroyWorld( worldId );
+
+	return 0;
+}
+
 int WorldTest( void )
 {
 	RUN_SUBTEST( HelloWorld );
@@ -1005,6 +1076,7 @@ int WorldTest( void )
 	RUN_SUBTEST( TestWorldCoverage );
 	RUN_SUBTEST( TestExplosion );
 	RUN_SUBTEST( TestSensor );
+	RUN_SUBTEST( TestContinuousMoveEvent );
 	RUN_SUBTEST( TestContactEvents );
 	RUN_SUBTEST( TestHitEvents );
 	RUN_SUBTEST( TestCompoundHitEvents );
