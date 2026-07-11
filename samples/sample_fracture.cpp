@@ -233,6 +233,13 @@ public:
 	int m_lastBodyCount = -1;
 };
 
+#define FRACTURE_SAMPLE( createFn, demo, name )                                                                        \
+	static Sample* createFn( SampleContext* context )                                                                  \
+	{                                                                                                                  \
+		return new FractureSample( context, demo );                                                                    \
+	}                                                                                                                  \
+	static int sample_##createFn = RegisterSample( "Fracture", name, createFn )
+
 FRACTURE_SAMPLE( CreateVoxelWall, "voxel_wall", "Voxel Wall" );
 FRACTURE_SAMPLE( CreateVoxelTower, "voxel_tower", "Voxel Tower" );
 FRACTURE_SAMPLE( CreateVoxelPyramid, "voxel_pyramid", "Voxel Pyramid" );

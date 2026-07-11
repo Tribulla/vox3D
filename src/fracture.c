@@ -529,6 +529,14 @@ static void b3F_formBody( b3FractureWorld* fw, int p, const int* voxels, int cou
 		int matI = b3F_vox( fw, voxels[seed] )->mat;
 		b3Vec3i c0 = b3F_vox( fw, voxels[seed] )->cell;
 
+#define B3F_OCC( CX, CY, CZ, OUT )                                                                                      \
+	do                                                                                                                 \
+	{                                                                                                                  \
+		b3Vec3i _c = { ( CX ), ( CY ), ( CZ ) };                                                                        \
+		int _j = b3F_mapGet( &local, b3F_packCell( _c ) );                                                              \
+		OUT = ( _j >= 0 && !covered[_j] && b3F_vox( fw, voxels[_j] )->mat == matI ) ? _j : -1;                          \
+	} while ( 0 )
+
 		int ex = c0.x, tmp;
 		for ( ;; )
 		{
