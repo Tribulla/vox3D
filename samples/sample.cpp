@@ -7,7 +7,7 @@
 
 #include "sample.h"
 
-#include "benchmarks.h"
+#include "benchmarks.h" // ResetGroundShapeId / GetGroundShapeId, used by the ground grid
 #include "gfx/debug_adapter.h"
 #include "gfx/draw.h"
 #include "gfx/gtao.h"
@@ -405,11 +405,6 @@ void Sample::Step()
 {
 	m_didStep = false;
 
-	if ( m_context->enableFracture && m_fractureApplied == false )
-	{
-		ApplyFractureToScene();
-	}
-
 	float timeStep = 0.0f;
 	if ( m_context->pause == false || m_context->singleStep > 0 )
 	{
@@ -549,28 +544,6 @@ b3BodyId Sample::AddGroundBox( float extent )
 	SetGroundShape( shapeId );
 
 	return groundId;
-}
-
-static bool CollectBodyCallback( b3ShapeId shapeId, void* context )
-{
-	( (std::vector<b3BodyId>*)context )->push_back( b3Shape_GetBody( shapeId ) );
-	return true;
-}
-
-void Sample::ApplyFractureToScene()
-{
-	m_fractureApplied = true;
-	b3World_EnableFracture( m_worldId, 1.0f, 0.0f );
-
-	b3AABB huge = { { -1.0e4f, -1.0e4f, -1.0e4f }, { 1.0e4f, 1.0e4f, 1.0e4f } };
-	std::vector<b3BodyId> bodies;
-	b3World_OverlapAABB( m_worldId, huge, b3DefaultQueryFilter(), CollectBodyCallback, &bodies );
-
-	b3FractureMaterial mat = b3GetFractureMaterial( b3_fractureStone );
-	for ( b3BodyId body : bodies )
-	{
-		b3World_MakeBodyFracture( m_worldId, body, mat, nullptr );
-	}
 }
 
 struct RowDef
@@ -2021,11 +1994,6 @@ static void DrawInfoPanel( SampleContext* context )
 		ImGui::Separator();
 	}
 	ImGui::PopItemWidth();
-
-	if ( ImGui::Checkbox( "Destructible bodies", &context->enableFracture ) )
-	{
-		SelectSample( context, context->sampleIndex, true );
-	}
 
 	if ( context->sample->HasSolverControls() && ImGui::CollapsingHeader( "Solver", ImGuiTreeNodeFlags_DefaultOpen ) )
 	{

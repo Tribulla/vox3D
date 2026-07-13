@@ -153,34 +153,16 @@ set(SAMPLE_FILES
 
     sample.cpp
     sample.h
-    mesh_loader.cpp
-    mesh_loader.h
     jsmn.h
-    tiny_obj_loader.h
-    earcut.h
 
-    # Samples
-    sample_benchmark.cpp
-    sample_bodies.cpp
-    sample_character.cpp
-    sample_collision.cpp
-    sample_compound.cpp
-    sample_continuous.cpp
-    sample_determinism.cpp
-    sample_events.cpp
-    sample_fracture.cpp
-    sample_geometry.cpp
-    sample_issues.cpp
-    sample_joint.cpp
-    sample_manifold.cpp
-    sample_mesh.cpp
-    sample_ragdoll.cpp
+    voxel_sample.h
+
     sample_replay.cpp
-    sample_robustness.cpp
-    sample_shapes.cpp
-    sample_stacking.cpp
-    sample_tree.cpp
-    sample_world.cpp
+
+    sample_voxel.cpp
+    sample_stress.cpp
+    sample_impact.cpp
+    sample_voxel_benchmark.cpp
 )
 
 add_executable(samples ${SAMPLE_FILES})

@@ -68,10 +68,6 @@ struct SampleContext
 	int singleStep = 0;
 	bool restart = false;
 
-	// Global "make the scene destructible" toggle (shared control panel). When on, the
-	// active sample's dynamic hull bodies are converted to Box3D fracture bodies.
-	bool enableFracture = false;
-
 	// UI visibility (Tab / View > Hide UI). When hidden only the minimal HUD shows.
 	bool showUI = true;
 
@@ -189,11 +185,6 @@ public:
 
 	// Static ground box at the origin, drawn with the procedural grid material
 	b3BodyId AddGroundBox( float extent );
-
-	// Convert the current scene's dynamic hull bodies into destructible fracture
-	// bodies in place (driven by SampleContext::enableFracture). Runs once.
-	void ApplyFractureToScene();
-	bool m_fractureApplied = false;
 
 #if defined( NDEBUG )
 	static constexpr bool m_isDebug = false;

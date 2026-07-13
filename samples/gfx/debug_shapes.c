@@ -293,7 +293,30 @@ static b3Vec3 TriangleNormal( b3Vec3 a, b3Vec3 b, b3Vec3 c )
 	return n;
 }
 
-static MeshHandle BuildHull( const b3HullData* hull )
+static uint32_t HullGeomKey( const b3HullData* hull )
+{
+	struct
+	{
+		b3AABB aabb;
+		b3Vec3 center;
+		float volume, surfaceArea;
+	} k = { hull->aabb, hull->center, hull->volume, hull->surfaceArea };
+	const uint8_t* p = (const uint8_t*)&k;
+	uint32_t h = 2166136261u; // FNV-1a
+	for ( size_t i = 0; i < sizeof( k ); ++i )
+	{
+		h ^= p[i];
+		h *= 16777619u;
+	}
+	h ^= h >> 16; // murmur3 fmix32 finalizer for good avalanche
+	h *= 0x85ebca6bu;
+	h ^= h >> 13;
+	h *= 0xc2b2ae35u;
+	h ^= h >> 16;
+	return h ? h : 1u;
+}
+
+static MeshHandle BuildHull( const b3HullData* hull, uint32_t key )
 {
 	const b3Vec3* points = b3GetHullPoints( hull );
 	const b3HullHalfEdge* edges = b3GetHullEdges( hull );
@@ -386,7 +409,7 @@ static MeshHandle BuildHull( const b3HullData* hull )
 		}
 	}
 
-	MeshHandle h = RegisterMesh( hull->hash, buf.vertices, buf.vertexCount, buf.indices, buf.indexCount, "geom_hull" );
+	MeshHandle h = RegisterMesh( key, buf.vertices, buf.vertexCount, buf.indices, buf.indexCount, "geom_hull" );
 
 	if ( IsMeshHandleValid( h ) )
 	{
@@ -796,14 +819,15 @@ MeshHandle FindOrAddHull( const b3HullData* hull )
 		return InvalidMeshHandle();
 	}
 
-	MeshHandle existing = FindMesh( hull->hash );
+	uint32_t key = HullGeomKey( hull );
+	MeshHandle existing = FindMesh( key );
 	if ( IsMeshHandleValid( existing ) )
 	{
 		AddMeshReference( existing );
 		return existing;
 	}
 
-	return BuildHull( hull );
+	return BuildHull( hull, key );
 }
 
 MeshHandle FindOrAddMesh( const b3MeshData* meshData )
