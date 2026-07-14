@@ -48,6 +48,7 @@ extern int RecordingTest( void );
 extern int ShapeTest( void );
 extern int TableTest( void );
 extern int VoxelTest( void );
+extern int VoxelCollideTest( void );
 extern int WorldTest( void );
 
 // Filter-aware test runner: skips tests that don't match the filter
@@ -122,6 +123,7 @@ int main( int argc, char** argv )
 	MAYBE_RUN_TEST( ShapeTest );
 	MAYBE_RUN_TEST( TableTest );
 	MAYBE_RUN_TEST( VoxelTest );
+	MAYBE_RUN_TEST( VoxelCollideTest );
 	MAYBE_RUN_TEST( WorldTest );
 
 	printf( "======================================\n" );

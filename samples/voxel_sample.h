@@ -157,6 +157,107 @@ static inline bool VoxAnchorLowX( b3Vec3i cell, void* context )
 	return cell.x < *(int*)context;
 }
 
+static inline void AppendCrenellatedWall( std::vector<b3Vec3i>& cells, int len, int height, int thick, int ox, int oy,
+										  int oz, int merlonW, int gapW, int merlonH, int slitEvery, int slitW, int slitH,
+										  int sill )
+{
+	int period = merlonW + gapW;
+	for ( int x = 0; x < len; ++x )
+		for ( int y = 0; y < height; ++y )
+		{
+			if ( y >= height - merlonH && period > 0 && ( x % period ) >= merlonW )
+				continue; // crenel gap between merlon teeth
+			if ( slitEvery > 0 && slitW > 0 && ( x % slitEvery ) < slitW && y >= sill && y < sill + slitH )
+				continue; // arrow-slit slot, carved through the full depth
+			for ( int z = 0; z < thick; ++z )
+				cells.push_back( b3Vec3i{ ox + x, oy + y, oz + z } );
+		}
+}
+
+template <typename HeightFn>
+static inline void AppendHeightfieldSkin( std::vector<b3Vec3i>& cells, int nx, int nz, int ox, int oz, int skin,
+										  HeightFn heightAt )
+{
+	for ( int x = 0; x < nx; ++x )
+		for ( int z = 0; z < nz; ++z )
+		{
+			int h = heightAt( x, z );
+			for ( int y = h - skin + 1; y <= h; ++y )
+				cells.push_back( b3Vec3i{ ox + x, y, oz + z } );
+		}
+}
+
+static inline void AppendCone( std::vector<b3Vec3i>& cells, int cx, int oy, int cz, int r0, int h, bool taperDown )
+{
+	for ( int i = 0; i < h; ++i )
+	{
+		float wide = taperDown ? (float)( i + 1 ) / (float)h : 1.0f - (float)i / (float)h;
+		int r = (int)( r0 * wide + 0.5f );
+		if ( r < 1 )
+			r = 1;
+		float rr = ( r + 0.25f ) * ( r + 0.25f );
+		for ( int dx = -r; dx <= r; ++dx )
+			for ( int dz = -r; dz <= r; ++dz )
+				if ( (float)( dx * dx + dz * dz ) <= rr )
+					cells.push_back( b3Vec3i{ cx + dx, oy + i, cz + dz } );
+	}
+}
+
+static inline void AppendHelicalChute( std::vector<b3Vec3i>& cells, int cx, int cz, int R, float turns, int topY,
+									   int dropTotal, int halfWidth, int wallH, int floorThick )
+{
+	const float twoPi = 6.28318530718f;
+	int steps = (int)( turns * twoPi * ( R + halfWidth ) ); // ~1 step per unit of outer arc => cells overlap, no seams
+	if ( steps < 1 )
+		steps = 1;
+	for ( int s = 0; s <= steps; ++s )
+	{
+		float t = (float)s / (float)steps;
+		float theta = t * turns * twoPi;
+		int yi = (int)( topY - t * (float)dropTotal + 0.5f );
+		float c = cosf( theta ), sn = sinf( theta );
+		for ( int u = -halfWidth; u <= halfWidth; ++u )
+		{
+			float rad = (float)( R + u );
+			int gx = (int)( cx + rad * c + 0.5f );
+			int gz = (int)( cz + rad * sn + 0.5f );
+			for ( int f = 0; f < floorThick; ++f )
+				cells.push_back( b3Vec3i{ gx, yi - f, gz } );
+			if ( u == -halfWidth || u == halfWidth )
+				for ( int w = 1; w <= wallH; ++w )
+					cells.push_back( b3Vec3i{ gx, yi + w, gz } );
+		}
+	}
+}
+
+static inline void AppendVoxelMoai( std::vector<b3Vec3i>& cells, int ox, int oy, int oz )
+{
+	auto inBox = []( int x, int y, int z, int x0, int x1, int y0, int y1, int z0, int z1 ) {
+		return x >= x0 && x <= x1 && y >= y0 && y <= y1 && z >= z0 && z <= z1;
+	};
+	for ( int x = 0; x <= 19; ++x )
+		for ( int y = 0; y <= 39; ++y )
+			for ( int z = 0; z <= 17; ++z )
+			{
+				int inset = ( y > 30 ) ? ( y - 30 ) / 4 : 0;
+				bool solid = inBox( x, y, z, 2 + inset, 17 - inset, 0, 39, 3, 15 );
+				if ( inBox( x, y, z, 3, 16, 0, 9, 0, 3 ) )
+					solid = true;
+				if ( inBox( x, y, z, 2, 17, 22, 26, 1, 3 ) )
+					solid = true;
+				if ( inBox( x, y, z, 8, 11, 12, 25, 0, 3 ) )
+					solid = true;
+				if ( !solid )
+					continue;
+				bool carve = inBox( x, y, z, 4, 8, 17, 21, 3, 6 ) ||	  // left eye
+							 inBox( x, y, z, 11, 15, 17, 21, 3, 6 ) || // right eye
+							 inBox( x, y, z, 7, 12, 8, 10, 3, 5 );	   // mouth
+				if ( carve )
+					continue;
+				cells.push_back( b3Vec3i{ ox + x, oy + y, oz + z } );
+			}
+}
+
 
 class VoxelSample : public Sample
 {

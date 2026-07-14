@@ -13,6 +13,7 @@
 // needed for dll export
 #include "aabb.h"
 #include "compound.h"
+#include "voxel_shape.h"
 
 #include "box3d/box3d.h"
 
@@ -54,6 +55,13 @@ static float b3ComputeShapeMargin( b3Shape* shape )
 				maxExtentSqr = b3MaxFloat( maxExtentSqr, distSqr );
 			}
 			margin = sqrtf( maxExtentSqr );
+		}
+		break;
+
+		case b3_voxelShape:
+		{
+			b3AABB bounds = b3VoxelData_GetBounds( shape->voxel );
+			margin = b3Length( b3AABB_Extents( bounds ) );
 		}
 		break;
 
@@ -160,6 +168,10 @@ static b3Shape* b3CreateShapeInternal( b3World* world, b3Body* body, b3WorldTran
 
 		case b3_heightShape:
 			shape->heightField = (b3HeightFieldData*)geometry;
+			break;
+
+		case b3_voxelShape:
+			shape->voxel = (const b3VoxelData*)geometry;
 			break;
 
 		default:
@@ -424,6 +436,12 @@ b3ShapeId b3CreateHeightFieldShape( b3BodyId bodyId, const b3ShapeDef* def, cons
 	return shapeId;
 }
 
+b3ShapeId b3CreateVoxelShape( b3BodyId bodyId, const b3ShapeDef* def, const b3VoxelData* voxels )
+{
+	B3_VALIDATE( voxels != NULL );
+	return b3CreateShape( bodyId, def, voxels, b3_voxelShape, b3Transform_identity, b3Vec3_one, false );
+}
+
 b3ShapeId b3CreateBakedCompoundShape( b3BodyId bodyId, b3ShapeDef* def, const b3CompoundData* compound )
 {
 	b3ShapeId shapeId = b3CreateShape( bodyId, def, compound, b3_compoundShape, b3Transform_identity, b3Vec3_one, false );
@@ -583,6 +601,9 @@ b3AABB b3ComputeShapeAABB( const b3Shape* shape, b3Transform transform )
 		case b3_sphereShape:
 			return b3ComputeSphereAABB( &shape->sphere, transform );
 
+		case b3_voxelShape:
+			return b3AABB_Transform( transform, b3VoxelData_GetBounds( shape->voxel ) );
+
 		default:
 		{
 			B3_ASSERT( false );
@@ -660,6 +681,11 @@ b3Vec3 b3GetShapeCentroid( const b3Shape* shape )
 			b3AABB aabb = b3ComputeHeightFieldAABB( shape->heightField, b3Transform_identity );
 			return b3AABB_Center( aabb );
 		}
+		case b3_voxelShape:
+		{
+			b3AABB aabb = b3VoxelData_GetBounds( shape->voxel );
+			return b3AABB_Center( aabb );
+		}
 		default:
 			return b3Vec3_zero;
 	}
@@ -724,6 +750,9 @@ b3MassData b3ComputeShapeMass( const b3Shape* shape )
 		case b3_sphereShape:
 			return b3ComputeSphereMass( &shape->sphere, shape->density );
 
+		case b3_voxelShape:
+			return b3Voxel_ComputeMass( shape->voxel, shape->density );
+
 		default:
 			return (b3MassData){ 0 };
 	}
@@ -784,6 +813,17 @@ b3ShapeExtent b3ComputeShapeExtent( const b3Shape* shape, b3Vec3 localCenter )
 		}
 		break;
 
+		case b3_voxelShape:
+		{
+			b3AABB aabb = b3VoxelData_GetBounds( shape->voxel );
+			float r1 = b3Length( b3Sub( aabb.lowerBound, localCenter ) );
+			float r2 = b3Length( b3Sub( aabb.upperBound, localCenter ) );
+			extent.minExtent = b3MinFloat( r1, r2 );
+			b3Vec3 p = b3FarthestPointOnAABB( aabb, localCenter );
+			extent.maxExtent = b3Abs( p );
+		}
+		break;
+
 		default:
 			break;
 	}
@@ -817,6 +857,9 @@ b3CastOutput b3RayCastShape( const b3Shape* shape, b3Transform transform, const 
 			break;
 		case b3_heightShape:
 			output = b3RayCastHeightField( shape->heightField, &localInput );
+			break;
+		case b3_voxelShape:
+			output = b3RayCastVoxel( shape->voxel, &localInput );
 			break;
 		default:
 			return output;
@@ -889,6 +932,9 @@ bool b3OverlapShape( const b3Shape* shape, b3Transform transform, const b3ShapeP
 
 		case b3_heightShape:
 			return b3OverlapHeightField( shape->heightField, transform, proxy );
+
+		case b3_voxelShape:
+			return b3OverlapVoxel( shape->voxel, transform, proxy );
 
 		case b3_hullShape:
 			return b3OverlapHull( shape->hull, transform, proxy );

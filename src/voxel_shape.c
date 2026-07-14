@@ -273,6 +273,13 @@ bool b3VoxelData_IsSolid( const b3VoxelData* v, b3Vec3i cell )
 	return v->chunks[ci].solid[li] != 0;
 }
 
+int b3VoxelData_GetCells( const b3VoxelData* v, b3Vec3i* cells, int capacity )
+{
+	if ( v == NULL || cells == NULL || capacity <= 0 )
+		return 0;
+	return b3Voxel_GetCells( v, cells, capacity );
+}
+
 float b3Voxel_GetVoxelSize( const b3VoxelData* v )
 {
 	return v->voxelSize;
@@ -371,4 +378,96 @@ int b3Voxel_QueryCells( const b3VoxelData* v, b3AABB queryLocal, b3Vec3i* out, i
 		}
 	}
 	return n;
+}
+
+static b3Vec3i b3Voxel_unpackChunk( uint64_t key )
+{
+	const int64_t OFF = 1 << 20;
+	const uint64_t M = ( 1ull << 21 ) - 1;
+	return (b3Vec3i){ (int)( (int64_t)( ( key >> 42 ) & M ) - OFF ), (int)( (int64_t)( ( key >> 21 ) & M ) - OFF ),
+					  (int)( (int64_t)( key & M ) - OFF ) };
+}
+
+int b3Voxel_GetCells( const b3VoxelData* v, b3Vec3i* out, int cap )
+{
+	int n = 0;
+	for ( int s = 0; s < v->slotCap; ++s )
+	{
+		if ( v->slots[s].key == 0 )
+			continue;
+		b3Vec3i cp = b3Voxel_unpackChunk( v->slots[s].key );
+		const b3VoxelChunk* chunk = v->chunks + v->slots[s].index;
+		int base[3] = { cp.x << B3_VOXEL_CHUNK_BITS, cp.y << B3_VOXEL_CHUNK_BITS, cp.z << B3_VOXEL_CHUNK_BITS };
+		for ( int k = 0; k < chunk->occupiedCount; ++k )
+		{
+			b3Vec3i lc = chunk->occupied[k];
+			if ( n < cap )
+				out[n] = (b3Vec3i){ base[0] + lc.x, base[1] + lc.y, base[2] + lc.z };
+			n++;
+			if ( n >= cap )
+				return cap;
+		}
+	}
+	return n;
+}
+
+b3MassData b3Voxel_ComputeMass( const b3VoxelData* v, float density )
+{
+	b3MassData md = { 0.0f, b3Vec3_zero, b3Mat3_zero };
+	if ( v == NULL || v->cellCount == 0 || density <= 0.0f )
+		return md;
+
+	float s = v->voxelSize;
+	float cellMass = density * s * s * s;
+	float cubeInertia = ( 1.0f / 6.0f ) * cellMass * s * s; // solid cube about its centre, per axis
+
+	double M = 0.0;
+	b3Vec3 com = b3Vec3_zero;
+	for ( int slot = 0; slot < v->slotCap; ++slot )
+	{
+		if ( v->slots[slot].key == 0 )
+			continue;
+		b3Vec3i cp = b3Voxel_unpackChunk( v->slots[slot].key );
+		const b3VoxelChunk* chunk = v->chunks + v->slots[slot].index;
+		int base[3] = { cp.x << B3_VOXEL_CHUNK_BITS, cp.y << B3_VOXEL_CHUNK_BITS, cp.z << B3_VOXEL_CHUNK_BITS };
+		for ( int k = 0; k < chunk->occupiedCount; ++k )
+		{
+			b3Vec3i lc = chunk->occupied[k];
+			b3Vec3 c = { ( base[0] + lc.x ) * s, ( base[1] + lc.y ) * s, ( base[2] + lc.z ) * s };
+			M += cellMass;
+			com = b3MulAdd( com, cellMass, c );
+		}
+	}
+	com = b3MulSV( 1.0f / (float)M, com );
+
+	b3Matrix3 I = b3Mat3_zero;
+	for ( int slot = 0; slot < v->slotCap; ++slot )
+	{
+		if ( v->slots[slot].key == 0 )
+			continue;
+		b3Vec3i cp = b3Voxel_unpackChunk( v->slots[slot].key );
+		const b3VoxelChunk* chunk = v->chunks + v->slots[slot].index;
+		int base[3] = { cp.x << B3_VOXEL_CHUNK_BITS, cp.y << B3_VOXEL_CHUNK_BITS, cp.z << B3_VOXEL_CHUNK_BITS };
+		for ( int k = 0; k < chunk->occupiedCount; ++k )
+		{
+			b3Vec3i lc = chunk->occupied[k];
+			b3Vec3 c = { ( base[0] + lc.x ) * s, ( base[1] + lc.y ) * s, ( base[2] + lc.z ) * s };
+			b3Vec3 r = b3Sub( c, com );
+			float rr = b3Dot( r, r );
+			I.cx.x += cubeInertia + cellMass * ( rr - r.x * r.x );
+			I.cy.y += cubeInertia + cellMass * ( rr - r.y * r.y );
+			I.cz.z += cubeInertia + cellMass * ( rr - r.z * r.z );
+			I.cx.y += -cellMass * r.x * r.y;
+			I.cx.z += -cellMass * r.x * r.z;
+			I.cy.z += -cellMass * r.y * r.z;
+		}
+	}
+	I.cy.x = I.cx.y;
+	I.cz.x = I.cx.z;
+	I.cz.y = I.cy.z;
+
+	md.mass = (float)M;
+	md.center = com;
+	md.inertia = I;
+	return md;
 }

@@ -30,6 +30,11 @@ static bool b3OverlapSensor( b3Shape* sensorShape, b3Transform sensorTransform, 
 {
 	b3ShapeType type = sensorShape->type;
 
+	if ( type == b3_voxelShape || visitorShape->type == b3_voxelShape )
+	{
+		return false;
+	}
+
 	b3ShapeProxy proxy = b3MakeShapeProxy( visitorShape );
 
 	// Get the visitor shape in the frame of the sensor

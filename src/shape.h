@@ -62,6 +62,7 @@ typedef struct b3Shape
 		b3Mesh mesh;
 		const b3HeightFieldData* heightField;
 		const b3CompoundData* compound;
+		const b3VoxelData* voxel;
 	};
 
 } b3Shape;

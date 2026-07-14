@@ -10,6 +10,8 @@
 
 #include <stdint.h>
 
+typedef struct b3VoxelData b3VoxelData;
+
 #define B3_DEFAULT_CATEGORY_BITS UINT64_MAX
 #define B3_DEFAULT_MASK_BITS UINT64_MAX
 
@@ -446,6 +448,8 @@ typedef enum b3ShapeType
 
 	/// A sphere with an offset
 	b3_sphereShape,
+
+	b3_voxelShape,
 
 	/// The number of shape types
 	b3_shapeTypeCount
@@ -2954,6 +2958,7 @@ typedef struct b3DebugShape
 		const b3HullData* hull;			  ///< Convex hull shape.
 		const b3Mesh* mesh;				  ///< Mesh shape with scale.
 		const b3Sphere* sphere;			  ///< Sphere shape.
+		const b3VoxelData* voxel;		  ///< Voxel grid shape.
 	};
 } b3DebugShape;
 

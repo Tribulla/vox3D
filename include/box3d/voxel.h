@@ -20,4 +20,6 @@ B3_API b3AABB b3VoxelData_GetBounds( const b3VoxelData* voxels );
 
 B3_API bool b3VoxelData_IsSolid( const b3VoxelData* voxels, b3Vec3i cell );
 
+B3_API int b3VoxelData_GetCells( const b3VoxelData* voxels, b3Vec3i* cells, int capacity );
+
 /**@}*/

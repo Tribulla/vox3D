@@ -19,7 +19,9 @@
 #include "sensor.h"
 #include "shape.h"
 #include "solver_set.h"
+#include "voxel_shape.h" // b3RayCastVoxel
 
+#include <float.h>
 #include <limits.h>
 #include <stddef.h>
 #include <stdio.h>
@@ -417,7 +419,37 @@ static bool b3ContinuousQueryCallback( int proxyId, uint64_t userData, void* con
 	b3Sweep sweepA = b3MakeRelativeSweep( bodySim, continuousContext->base );
 
 	// Time of impact versus shape. Supports all shape types
-	b3TOIOutput output = b3ShapeTimeOfImpact( shape, fastShape, &sweepA, &continuousContext->sweep, continuousContext->fraction );
+	b3TOIOutput output;
+	if ( shape->type == b3_voxelShape )
+	{
+		output = ( b3TOIOutput ){ 0 };
+		output.fraction = continuousContext->fraction; // default: no earlier hit
+
+		b3BodySim* voxelSim = b3GetBodySim( world, body );
+		b3Transform xfVoxel = { b3SubPos( voxelSim->transform.p, continuousContext->base ), voxelSim->transform.q };
+		b3Vec3 o = b3InvTransformPoint( xfVoxel, continuousContext->centroid1 );
+		b3Vec3 e = b3InvTransformPoint( xfVoxel, continuousContext->centroid2 );
+		b3Vec3 d = b3Sub( e, o );
+		float len = b3Length( d );
+		if ( len > FLT_EPSILON )
+		{
+			b3RayCastInput input = { o, d, 1.0f };
+			b3CastOutput cast = b3RayCastVoxel( shape->voxel, &input );
+			if ( cast.hit )
+			{
+				float frac = cast.fraction - fastBodySim->minExtent / len;
+				if ( frac < 0.0f )
+					frac = 0.0f;
+				output.fraction = frac;
+				output.point = b3Lerp( continuousContext->centroid1, continuousContext->centroid2, cast.fraction );
+				output.normal = b3RotateVector( xfVoxel.q, cast.normal );
+			}
+		}
+	}
+	else
+	{
+		output = b3ShapeTimeOfImpact( shape, fastShape, &sweepA, &continuousContext->sweep, continuousContext->fraction );
+	}
 	if ( isSensor )
 	{
 		// Only accept a sensor hit that is sooner than the current solid hit.
@@ -525,8 +557,7 @@ static void b3SolveContinuous( b3World* world, int bodySimIndex, b3TaskContext* 
 		// Store this to avoid double computation in the case there is no impact event
 		fastShape->aabb = box2;
 
-		// No continuous collision for meshes
-		if ( fastShape->type == b3_meshShape || fastShape->type == b3_heightShape )
+		if ( fastShape->type == b3_meshShape || fastShape->type == b3_heightShape || fastShape->type == b3_voxelShape )
 		{
 			continue;
 		}

@@ -163,6 +163,7 @@ set(SAMPLE_FILES
     sample_stress.cpp
     sample_impact.cpp
     sample_voxel_benchmark.cpp
+    sample_voxel_collision.cpp
 )
 
 add_executable(samples ${SAMPLE_FILES})

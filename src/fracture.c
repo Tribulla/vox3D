@@ -1,3 +1,7 @@
+#if defined( _MSC_VER ) && !defined( _CRT_SECURE_NO_WARNINGS )
+#define _CRT_SECURE_NO_WARNINGS // getenv (FRAC_PERVOXELBOX debug toggle)
+#endif
+
 #include "fracture.h"
 
 #include "box3d/box3d.h"
@@ -10,10 +14,12 @@
 
 #include <limits.h>
 #include <math.h>
+#include <stdlib.h>
 #include <string.h>
 
 static const int FACE[6][3] = { { 1, 0, 0 }, { -1, 0, 0 }, { 0, 1, 0 }, { 0, -1, 0 }, { 0, 0, 1 }, { 0, 0, -1 } };
 static const float B3F_EPS = 1e-9f;
+#define B3F_RESTON_HOLD 8 // frames a voxel stays "supported" after its last resting contact
 
 static int b3F_iaxis( b3Vec3i c, int a )
 {
@@ -175,6 +181,7 @@ typedef struct b3FractureVoxel
 	b3Vec3 force;	 // EMA-smoothed contact force (section analysis)
 	b3Vec3 forceRaw; // this frame's raw contact force (local impact)
 	int restOn;		 // -1 none, -2 static/fixed support, else a dynamic body key
+	uint8_t restOnAge;	 // frames restOn stays latched after the last contact (jitter smoothing)
 	uint8_t anchor;
 	uint8_t brokenFaces; // bitmask of severed face-bonds
 } b3FractureVoxel;
@@ -221,8 +228,9 @@ enum
 typedef struct b3FracturePiece
 {
 	b3BodyId body;
-	b3Array( int ) voxels; // member node ids (voxels or chunks by kind)
-	b3Vec3 localOffset;	   // voxel body-frame centre = cell*voxel + localOffset (voxel kind)
+	b3VoxelData* voxelData; // owned b3_voxelShape geometry (voxel kind + useVoxelShape); NULL otherwise
+	b3Array( int ) voxels;	// member node ids (voxels or chunks by kind)
+	b3Vec3 localOffset;		// voxel body-frame centre = cell*voxel + localOffset (voxel kind)
 	uint8_t kind;
 	uint8_t isStatic;
 	uint8_t debris;
@@ -301,6 +309,7 @@ typedef struct b3FractureWorld
 	b3Vec3 gravity;
 	long frame;
 	b3FractureTuning tuning;
+	bool useVoxelShape; // voxel bodies use ONE b3_voxelShape instead of per-voxel box hulls
 
 	b3Array( b3FractureVoxel ) voxels;
 	b3Array( b3FracturePiece ) pieces;
@@ -397,6 +406,9 @@ static b3FractureWorld* b3F_getOrCreate( b3World* world, b3WorldId worldId, floa
 		fw->radius = 0.5f * voxel;
 		fw->groundY = groundY;
 		fw->tuning = b3DefaultFractureTuning();
+		fw->useVoxelShape = true; // voxel fracture bodies collide via one aggregated b3_voxelShape
+		if ( getenv( "FRAC_PERVOXELBOX" ) != NULL )
+			fw->useVoxelShape = false; // A/B: revert to one box hull per voxel
 		world->fractureWorld = fw;
 	}
 	return fw;
@@ -482,6 +494,57 @@ static void b3F_formBody( b3FractureWorld* fw, int p, const int* voxels, int cou
 		com = b3MulAdd( com, m, wpos[i] );
 	}
 	com = b3MulSV( 1.0f / (float)M, com );
+
+	if ( fw->useVoxelShape )
+	{
+		b3Vec3i g0 = b3F_vox( fw, voxels[0] )->cell;
+		b3Vec3 originWorld = wpos[0];
+
+		b3BodyDef bd = b3DefaultBodyDef();
+		bd.type = isStatic ? b3_staticBody : b3_dynamicBody;
+		bd.position = b3ToPos( originWorld );
+		bd.rotation = rot;
+		bd.linearVelocity = b3Add( vel, b3Cross( omega, b3Sub( originWorld, com ) ) );
+		bd.angularVelocity = omega;
+		b3BodyId body = b3CreateBody( fw->worldId, &bd );
+
+		b3Vec3i* rcells = (b3Vec3i*)b3Alloc( (size_t)count * sizeof( b3Vec3i ) );
+		for ( int i = 0; i < count; ++i )
+		{
+			b3FractureVoxel* vx = b3F_vox( fw, voxels[i] );
+			b3Vec3i r = { vx->cell.x - g0.x, vx->cell.y - g0.y, vx->cell.z - g0.z };
+			rcells[i] = r;
+			vx->local = ( b3Vec3 ){ r.x * fw->voxel, r.y * fw->voxel, r.z * fw->voxel };
+			vx->piece = p;
+		}
+		b3VoxelData* vd = b3CreateVoxelData( rcells, count, fw->voxel );
+		b3Free( rcells, (size_t)count * sizeof( b3Vec3i ) );
+
+		b3FractureMaterial* mat = fw->materials.data + b3F_vox( fw, voxels[0] )->mat;
+		b3ShapeDef sd = b3DefaultShapeDef();
+		sd.density = mat->density;
+		sd.baseMaterial.friction = mat->friction;
+		sd.baseMaterial.restitution = mat->restitution;
+		sd.baseMaterial.customColor = mat->color ? mat->color : 1u;
+		sd.enableContactEvents = true;
+		b3ShapeId shape = b3CreateVoxelShape( body, &sd, vd );
+
+		b3FracturePiece* P = fw->pieces.data + p;
+		b3Array_Clear( P->voxels );
+		b3Array_Append( P->voxels, voxels, count );
+		P->body = body;
+		P->voxelData = vd;
+		P->localOffset = ( b3Vec3 ){ -g0.x * fw->voxel, -g0.y * fw->voxel, -g0.z * fw->voxel };
+		P->isStatic = (uint8_t)isStatic;
+		P->debris = (uint8_t)debris;
+		P->merge = (uint8_t)merge;
+		P->active = 1;
+		P->peakApproach = 0.0f;
+		P->overloadStreak = 0;
+		for ( int i = 0; i < count; ++i )
+			b3F_vox( fw, voxels[i] )->shape = shape;
+		return;
+	}
 
 	b3BodyDef bd = b3DefaultBodyDef();
 	bd.type = isStatic ? b3_staticBody : b3_dynamicBody;
@@ -716,6 +779,11 @@ static void b3F_destroyPieceBody( b3FractureWorld* fw, int p )
 	b3FracturePiece* P = fw->pieces.data + p;
 	if ( P->active && b3Body_IsValid( P->body ) )
 		b3DestroyBody( P->body );
+	if ( P->voxelData != NULL )
+	{
+		b3DestroyVoxelData( P->voxelData );
+		P->voxelData = NULL;
+	}
 	P->active = 0;
 	b3Array_Clear( P->voxels );
 }
@@ -945,7 +1013,10 @@ static void b3F_gatherPiece( b3FractureWorld* fw, int p, int worker, float invDt
 				vx->force = b3Add( vx->force, b3MulSV( a, Ffull ) );
 				vx->forceRaw = b3Add( vx->forceRaw, Ffull );
 				if ( b3Dot( Ffull, gUp ) > 0.0f )
+				{
 					vx->restOn = otherKey;
+					vx->restOnAge = B3F_RESTON_HOLD;
+				}
 			}
 		}
 	}
@@ -973,8 +1044,15 @@ static void b3F_gatherContactForces( b3World* world, b3FractureWorld* fw, float 
 	for ( int v = 0; v < fw->voxels.count; ++v )
 		if ( fw->voxels.data[v].piece >= 0 )
 		{
-			fw->voxels.data[v].restOn = -1;
-			fw->voxels.data[v].forceRaw = b3Vec3_zero;
+			// Latch support for a few frames: aggregated voxel manifolds drop and
+			// re-form contact points frame-to-frame, so a hard reset would make a
+			// resting face's support set flicker and spuriously fracture the body.
+			b3FractureVoxel* vx = fw->voxels.data + v;
+			if ( vx->restOnAge > 0 )
+				vx->restOnAge--;
+			if ( vx->restOnAge == 0 )
+				vx->restOn = -1;
+			vx->forceRaw = b3Vec3_zero;
 		}
 	for ( int c = 0; c < fw->chunks.count; ++c )
 		if ( fw->chunks.data[c].piece >= 0 )

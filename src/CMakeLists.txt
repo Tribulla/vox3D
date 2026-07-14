@@ -87,6 +87,9 @@ set(BOX3D_SOURCE_FILES
 	triangle_manifold.c
 	types.c
 	verstable.h
+	voxel_collide.c
+	voxel_collide.h
+	voxel_manifold.c
 	voxel_shape.c
 	voxel_shape.h
 	weld_joint.c

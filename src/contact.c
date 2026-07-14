@@ -138,6 +138,10 @@ void b3InitializeContactRegisters( void )
 		b3AddType( b3_heightShape, b3_sphereShape );
 		b3AddType( b3_heightShape, b3_capsuleShape );
 		b3AddType( b3_heightShape, b3_hullShape );
+		b3AddType( b3_voxelShape, b3_voxelShape );
+		b3AddType( b3_voxelShape, b3_sphereShape );
+		b3AddType( b3_voxelShape, b3_capsuleShape );
+		b3AddType( b3_voxelShape, b3_hullShape );
 		s_initialized = true;
 	}
 }
@@ -217,7 +221,7 @@ void b3CreateContact( b3World* world, b3Shape* shapeA, b3Shape* shapeB, int chil
 		contact->flags |= b3_contactRecycleFlag;
 	}
 
-	if ( shapeA->type == b3_meshShape || shapeA->type == b3_heightShape )
+	if ( shapeA->type == b3_meshShape || shapeA->type == b3_heightShape || shapeA->type == b3_voxelShape )
 	{
 		contact->flags |= b3_simMeshContact;
 	}
@@ -231,7 +235,8 @@ void b3CreateContact( b3World* world, b3Shape* shapeA, b3Shape* shapeB, int chil
 	}
 
 	// todo impose these restrictions to make life easier
-	B3_ASSERT( shapeB->type == b3_sphereShape || shapeB->type == b3_capsuleShape || shapeB->type == b3_hullShape );
+	B3_ASSERT( shapeB->type == b3_sphereShape || shapeB->type == b3_capsuleShape || shapeB->type == b3_hullShape ||
+			   shapeB->type == b3_voxelShape );
 	// B3_ASSERT( bodyB->type != b3_staticBody );
 
 	// Is either body static?
@@ -826,6 +831,21 @@ bool b3UpdateContact( b3World* world, int workerIndex, b3Contact* contact, b3Sha
 
 		// Compute mesh manifolds
 		touching = b3ComputeMeshManifolds( world, workerIndex, contact, shapeA, NULL, xfA, shapeB, xfB, isFast, arena );
+
+		if ( touching && ( ( shapeA->flags & b3_enableHitEvents ) || ( shapeB->flags & b3_enableHitEvents ) ) )
+		{
+			contact->flags |= b3_simEnableHitEvent;
+		}
+		else
+		{
+			contact->flags &= ~b3_simEnableHitEvent;
+		}
+
+		B3_ASSERT( ( touching == true && contact->manifoldCount > 0 ) || ( touching == false && contact->manifoldCount == 0 ) );
+	}
+	else if ( shapeA->type == b3_voxelShape )
+	{
+		touching = b3ComputeVoxelManifolds( world, workerIndex, contact, shapeA, xfA, shapeB, xfB, arena );
 
 		if ( touching && ( ( shapeA->flags & b3_enableHitEvents ) || ( shapeB->flags & b3_enableHitEvents ) ) )
 		{
