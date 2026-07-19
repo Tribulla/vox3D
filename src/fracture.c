@@ -404,6 +404,7 @@ b3FractureTuning b3DefaultFractureTuning( void )
 	t.maxDebris = 0;
 	t.fractureEnabled = true;
 	t.contactStress = true;
+	t.stressEnabled = true;
 	t.parallelAnalysis = true;
 	return t;
 }
@@ -2510,7 +2511,7 @@ void b3FractureWorld_Step( b3World* world, float dt )
 				continue; // inert: no interfaces left, nothing in the pipeline can affect it
 			if ( P->isStatic == 0 && b3Body_IsAwake( P->body ) == false )
 				continue;
-			bool analyse = stride == 1 || ( ( fw->frame + p ) % stride ) == 0;
+			bool analyse = fw->tuning.stressEnabled && ( stride == 1 || ( ( fw->frame + p ) % stride ) == 0 );
 			bool impacted = doFracture && ( P->kind == b3F_kindChunk ? b3F_impactChunkPiece( fw, p )
 																	 : b3F_impactFracture( fw, p ) );
 			if ( !impacted && analyse )
@@ -2545,7 +2546,7 @@ void b3FractureWorld_Step( b3World* world, float dt )
 				continue; // inert: no interfaces left, nothing in the pipeline can affect it
 			if ( P->isStatic == 0 && b3Body_IsAwake( P->body ) == false )
 				continue;
-			bool analyse = stride == 1 || ( ( fw->frame + p ) % stride ) == 0;
+			bool analyse = fw->tuning.stressEnabled && ( stride == 1 || ( ( fw->frame + p ) % stride ) == 0 );
 			b3F_Decision dec;
 			if ( P->kind == b3F_kindChunk )
 			{

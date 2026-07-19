@@ -70,6 +70,7 @@ typedef struct b3FractureTuning
 							 ///< otherwise leave thousands of rubble bodies for the solver every step.
 	bool fractureEnabled;	 ///< master switch: analyse only vs. actually sever
 	bool contactStress;		 ///< fold Box3D contact forces into the analysis
+	bool stressEnabled;		 ///< run the lattice stress analysis (b3_fractureStress severs). When false only
 	bool parallelAnalysis;	 ///< run the per-body contact gathering and stress analysis on the world's
 							 ///< worker threads (needs b3WorldDef.workerCount > 1; all analyses then see
 							 ///< the same pre-fracture snapshot instead of earlier splits in the same step)
