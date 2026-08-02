@@ -136,17 +136,6 @@ the voxel/fracture suites.
 
 SIMD (SSE2 / Neon) can be disabled with `BOX3D_DISABLE_SIMD`.
 
-## Roadmap
-
-- ✅ Voxel stress + fracture engine, materials, impact/self-weight fracturing.
-- ✅ Instanced voxel-box renderer (one shared unit-cube geometry).
-- ✅ Parallel contact-gather / stress-analysis by default.
-- ✅ `b3_voxelShape` **Phase 1** — data model + spatial query layer + unit tests.
-- ✅ `b3_voxelShape` narrowphase — box-vs-box SAT, voxel-vs-voxel and
-  voxel-vs-convex contact generation, dense-region aggregation, solver wiring.
-- 🔭 Routing fracture bodies onto the voxel shape; broader query/raycast support;
-  finishing the `Box3D` → `Vox3D` rename.
-
 ## Credits and license
 
 Vox3D is a fork of **[Box3D](https://github.com/erincatto/box3d) by Erin Catto**.
@@ -162,3 +151,6 @@ work is being ported from the KRUNCH_AVBD collider which is licensed as ARR.
 
 Please star and support upstream Box3D via
 [GitHub Sponsors](https://github.com/sponsors/erincatto).
+
+My development discord server where you can talk and ask questions about vox3D can be found here:
+https://discord.gg/SJTxJeJBvb
