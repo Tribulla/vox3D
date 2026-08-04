@@ -147,7 +147,8 @@ and comes from the closed source Krunch_AVBD physics engine powering the
 valkyrien skies minecraft mod.
 
 Vox3D and Box3D are released under the [MIT license](LICENSE). The voxel collider
-work is being ported from the KRUNCH_AVBD collider which is licensed as ARR.
+work is being ported from the KRUNCH_AVBD collider which is licensed as ARR but the voxel collider
+code in vox3D is licensed under MIT with permission from the original creator to relicense it under MIT.
 
 Please star and support upstream Box3D via
 [GitHub Sponsors](https://github.com/sponsors/erincatto).
