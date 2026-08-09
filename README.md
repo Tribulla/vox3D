@@ -45,7 +45,7 @@ in [`src/fracture.c`](src/fracture.c).
   minimum fragment size, debris caps, analysis stride, and parallel analysis
   (the contact gather and stress analysis parallelize across pieces).
 
-### Voxel collision shape — *in development*
+### Voxel collision shape
 
 `b3VoxelData` collision geometry (see
 [`include/box3d/voxel.h`](include/box3d/voxel.h)) ported from the fast
