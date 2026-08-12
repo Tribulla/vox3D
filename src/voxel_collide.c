@@ -386,6 +386,8 @@ int b3VoxelCollideAABB( const b3AABB* a0, const b3AABB* a1, float contactDistanc
 }
 
 #define B3_VOXEL_MAX_CONTACTS 64
+#define B3_VOXEL_MAX_CONTACTS_PER_NORMAL 8
+#define B3_VOXEL_NORMAL_CLUSTER_DOT 0.996f
 
 static inline b3Vec3 b3Voxel_xfPoint( b3Transform xf, b3Vec3 local )
 {
@@ -556,11 +558,88 @@ static float b3Voxel_spreadScore( const b3VoxelContact* c, const b3VoxelContact*
 
 void b3Voxel_addReduced( const b3VoxelContact* c, b3VoxelContact* acc, int* nacc, int maxContacts )
 {
+	int members[B3_VOXEL_MAX_CONTACTS_PER_NORMAL];
+	int memberCount = 0;
+	for ( int i = 0; i < *nacc; ++i )
+	{
+		if ( b3Dot( acc[i].normal, c->normal ) > B3_VOXEL_NORMAL_CLUSTER_DOT )
+		{
+			if ( memberCount < B3_VOXEL_MAX_CONTACTS_PER_NORMAL )
+				members[memberCount] = i;
+			memberCount += 1;
+		}
+	}
+
+	if ( memberCount < B3_VOXEL_MAX_CONTACTS_PER_NORMAL && *nacc < maxContacts )
+	{
+		acc[( *nacc )++] = *c;
+		return;
+	}
+
+	if ( memberCount >= B3_VOXEL_MAX_CONTACTS_PER_NORMAL )
+	{
+		b3VoxelContact options[B3_VOXEL_MAX_CONTACTS_PER_NORMAL + 1];
+		for ( int i = 0; i < B3_VOXEL_MAX_CONTACTS_PER_NORMAL; ++i )
+			options[i] = acc[members[i]];
+		options[B3_VOXEL_MAX_CONTACTS_PER_NORMAL] = *c;
+
+		bool used[B3_VOXEL_MAX_CONTACTS_PER_NORMAL + 1] = { false };
+		int selected[B3_VOXEL_MAX_CONTACTS_PER_NORMAL];
+		int selectedCount = 0;
+		int deepest = 0;
+		for ( int i = 1; i <= B3_VOXEL_MAX_CONTACTS_PER_NORMAL; ++i )
+		{
+			if ( options[i].penetrationDepth > options[deepest].penetrationDepth )
+				deepest = i;
+		}
+		selected[selectedCount++] = deepest;
+		used[deepest] = true;
+
+		while ( selectedCount < B3_VOXEL_MAX_CONTACTS_PER_NORMAL )
+		{
+			int best = -1;
+			float bestDistance = -1.0f;
+			float bestDepth = -FLT_MAX;
+			for ( int i = 0; i <= B3_VOXEL_MAX_CONTACTS_PER_NORMAL; ++i )
+			{
+				if ( used[i] )
+					continue;
+				float minDistance = FLT_MAX;
+				for ( int j = 0; j < selectedCount; ++j )
+				{
+					b3Vec3 diff = b3Sub( options[i].body0Point, options[selected[j]].body0Point );
+					float distance = b3Dot( diff, diff );
+					if ( distance < minDistance )
+						minDistance = distance;
+				}
+				if ( minDistance > bestDistance ||
+					 ( minDistance == bestDistance && options[i].penetrationDepth > bestDepth ) )
+				{
+					best = i;
+					bestDistance = minDistance;
+					bestDepth = options[i].penetrationDepth;
+				}
+			}
+			if ( best < 0 )
+				break;
+			selected[selectedCount++] = best;
+			used[best] = true;
+		}
+
+		if ( used[B3_VOXEL_MAX_CONTACTS_PER_NORMAL] )
+		{
+			for ( int i = 0; i < B3_VOXEL_MAX_CONTACTS_PER_NORMAL; ++i )
+				acc[members[i]] = options[selected[i]];
+		}
+		return;
+	}
+
 	if ( *nacc < maxContacts )
 	{
 		acc[( *nacc )++] = *c;
 		return;
 	}
+
 	float newScore = b3Voxel_spreadScore( c, acc, *nacc, -1 );
 	int weakest = 0;
 	float weakScore = FLT_MAX;

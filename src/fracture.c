@@ -179,6 +179,7 @@ typedef struct b3FractureVoxel
 	uint8_t restOnAge;	 // frames restOn stays latched after the last contact (jitter smoothing)
 	uint8_t anchor;
 	uint8_t brokenFaces; // bitmask of severed face-bonds
+	int nbr[6];		   // cached voxel ids for the six face-adjacent cells
 
 	b3Vec3i cell;
 	int mat;

@@ -37,6 +37,20 @@ _Static_assert( B3_MAX_WORLDS < UINT16_MAX, "B3_MAX_WORLDS limit exceeded" );
 b3World b3_worlds[B3_MAX_WORLDS];
 b3AtomicInt b3_worldCount;
 int b3_maxWorldCount;
+static b3AtomicInt b3_worldRegistryLock;
+
+static void b3LockWorldRegistry( void )
+{
+	while ( b3AtomicCompareExchangeInt( &b3_worldRegistryLock, 0, 1 ) == false )
+	{
+		b3Yield();
+	}
+}
+
+static void b3UnlockWorldRegistry( void )
+{
+	b3AtomicStoreInt( &b3_worldRegistryLock, 0 );
+}
 
 const b3HullData* b3AddHullToDatabase( b3World* world, const b3HullData* src )
 {
@@ -211,6 +225,10 @@ b3WorldId b3CreateWorld( const b3WorldDef* def )
 	B3_ASSERT( B3_LINEAR_SLOP <= B3_MESH_REST_OFFSET );
 	B3_ASSERT( B3_MESH_REST_OFFSET < B3_SPECULATIVE_DISTANCE );
 
+	// Physics islands may create worlds concurrently. Reserve the global slot before
+	// initializing it so two creators cannot both memset and populate the same world.
+	b3LockWorldRegistry();
+
 	int worldId = B3_NULL_INDEX;
 	for ( int i = 0; i < B3_MAX_WORLDS; ++i )
 	{
@@ -225,6 +243,7 @@ b3WorldId b3CreateWorld( const b3WorldDef* def )
 	{
 		b3Log( "B3_MAX_WORLDS of %d exceeded!!!", B3_MAX_WORLDS );
 		B3_ASSERT( worldId != B3_NULL_INDEX );
+		b3UnlockWorldRegistry();
 		return (b3WorldId){ 0 };
 	}
 
@@ -245,6 +264,7 @@ b3WorldId b3CreateWorld( const b3WorldDef* def )
 	world->worldId = (uint16_t)worldId;
 	world->generation = revision;
 	world->inUse = true;
+	b3UnlockWorldRegistry();
 
 	world->stack = b3CreateStack( 2048 );
 
@@ -399,8 +419,6 @@ b3WorldId b3CreateWorld( const b3WorldDef* def )
 
 void b3DestroyWorld( b3WorldId worldId )
 {
-	b3AtomicFetchAddInt( &b3_worldCount, -1 );
-
 	b3World* world = b3GetUnlockedWorldFromId( worldId );
 	if ( world == NULL )
 	{
@@ -525,10 +543,15 @@ void b3DestroyWorld( b3WorldId worldId )
 
 	b3DestroyStack( &world->stack );
 
+	b3LockWorldRegistry();
+
 	// Wipe world but preserve generation
 	uint16_t generation = world->generation;
 	memset( world, 0, sizeof( b3World ) );
 	world->generation = generation + 1;
+	b3AtomicFetchAddInt( &b3_worldCount, -1 );
+
+	b3UnlockWorldRegistry();
 
 	// b3Log( "Destroyed world %d", worldId.index1 - 1 );
 }
@@ -540,7 +563,10 @@ int b3GetWorldCount( void )
 
 int b3GetMaxWorldCount( void )
 {
-	return b3_maxWorldCount;
+	b3LockWorldRegistry();
+	int maxWorldCount = b3_maxWorldCount;
+	b3UnlockWorldRegistry();
+	return maxWorldCount;
 }
 
 // Issues T0 prefetches across the cache lines of a b3Contact (216 B / 4 lines).
