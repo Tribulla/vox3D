@@ -50,7 +50,7 @@ static b3TriangleFeature b3GetTriangleFeature( const b3SimplexCache* cache )
 	return s_triangleFeatures[mask];
 }
 
-void b3CollideTriangleAndSphere( b3LocalManifold* manifold, int capacity, const b3Vec3* triangleA, const b3Sphere* sphereB )
+void b3CollideSphereAndTriangle( b3LocalManifold* manifold, int capacity, const b3Sphere* sphereA, const b3Vec3* triangleB )
 {
 	manifold->pointCount = 0;
 
@@ -59,8 +59,8 @@ void b3CollideTriangleAndSphere( b3LocalManifold* manifold, int capacity, const 
 		return;
 	}
 
-	b3Vec3 center = sphereB->center;
-	b3Vec3 v1 = triangleA[0], v2 = triangleA[1], v3 = triangleA[2];
+	b3Vec3 center = sphereA->center;
+	b3Vec3 v1 = triangleB[0], v2 = triangleB[1], v3 = triangleB[2];
 	b3Plane plane = b3MakePlaneFromPoints( v1, v2, v3 );
 
 	float offset = b3PlaneSeparation( plane, center );
@@ -70,23 +70,19 @@ void b3CollideTriangleAndSphere( b3LocalManifold* manifold, int capacity, const 
 		return;
 	}
 
-	float radius = sphereB->radius;
-
 	// Closest point on triangle to sphere center
 	b3TrianglePoint closest = b3ClosestPointOnTriangle( v1, v2, v3, center );
 
 	// Test separating axis
 	float squaredDistance = b3DistanceSquared( closest.point, center );
 	float speculativeDistance = B3_SPECULATIVE_DISTANCE;
-	float maxDistance = radius + speculativeDistance;
+	float maxDistance = sphereA->radius + speculativeDistance;
 	if ( squaredDistance > maxDistance * maxDistance )
 	{
 		return;
 	}
 
 	float distance = sqrtf( squaredDistance );
-
-	// Normal points from triangle to sphere
 	b3Vec3 normal;
 	if ( distance * distance > 1000.0f * FLT_MIN )
 	{
@@ -98,8 +94,7 @@ void b3CollideTriangleAndSphere( b3LocalManifold* manifold, int capacity, const 
 	}
 
 	// contact point mid-way
-	// p = 0.5 * (c + q) - 0.5 * r * n
-	b3Vec3 contactPoint = b3MulSV( 0.5f, b3Add( b3Sub( center, b3MulSV( radius, normal ) ), closest.point ) );
+	b3Vec3 contactPoint = b3MulSV( 0.5f, b3Add( b3Sub( center, b3MulSV( sphereA->radius, normal ) ), closest.point ) );
 
 	manifold->normal = normal;
 	manifold->pointCount = 1;
@@ -108,7 +103,7 @@ void b3CollideTriangleAndSphere( b3LocalManifold* manifold, int capacity, const 
 
 	b3LocalManifoldPoint* mp = manifold->points + 0;
 	mp->point = contactPoint;
-	mp->separation = distance - radius;
+	mp->separation = distance - sphereA->radius;
 	mp->pair = b3FeaturePair_single;
 }
 
@@ -141,7 +136,7 @@ static bool b3ClipSegmentToTriangleFace( b3ClipVertex segment[2], const b3Vec3* 
 		}
 
 		// If the points are on different sides of the plane
-		if ( ( distance1 > 0.0f ) != ( distance2 > 0.0f ) )
+		if ( distance1 * distance2 < 0.0f )
 		{
 			// Find intersection point of edge and plane
 			float t = distance1 / ( distance1 - distance2 );
@@ -161,30 +156,28 @@ static bool b3ClipSegmentToTriangleFace( b3ClipVertex segment[2], const b3Vec3* 
 	return true;
 }
 
-static b3SeparatingAxis b3QueryTriangleFaceAndCapsule( b3Plane plane, const b3Capsule* capsule )
+static b3FaceQuery b3QueryTriangleFaceAndCapsule( b3Plane plane, const b3Capsule* capsule )
 {
 	float separation1 = b3PlaneSeparation( plane, capsule->center1 );
 	float separation2 = b3PlaneSeparation( plane, capsule->center2 );
 
 	if ( separation1 < separation2 )
 	{
-		return (b3SeparatingAxis){
-			.normal = plane.normal,
+		return (b3FaceQuery){
 			.separation = separation1,
-			.indexA = 0,
-			.indexB = 0,
+			.faceIndex = 0,
+			.vertexIndex = 0,
 		};
 	}
 
-	return (b3SeparatingAxis){
-		.normal = plane.normal,
+	return (b3FaceQuery){
 		.separation = separation2,
-		.indexA = 0,
-		.indexB = 1,
+		.faceIndex = 0,
+		.vertexIndex = 1,
 	};
 }
 
-static b3SeparatingAxis b3QueryTriangleAndCapsuleEdges( const b3Vec3* vertices, b3Plane plane, const b3Capsule* capsule )
+static b3EdgeQuery b3QueryTriangleAndCapsuleEdges( const b3Vec3* vertices, b3Plane plane, const b3Capsule* capsule )
 {
 	// Work in the local space of the capsule
 	b3Vec3 p1 = capsule->center1;
@@ -199,7 +192,6 @@ static b3SeparatingAxis b3QueryTriangleAndCapsuleEdges( const b3Vec3* vertices, 
 	float squaredTolerance = 0.005f * 0.005f;
 
 	int edgeIndex = 2;
-	float a = b3Dot( capsuleEdge, plane.normal );
 	b3Vec3 v1 = vertices[2];
 	for ( int index = 0; index < 3; ++index )
 	{
@@ -210,13 +202,12 @@ static b3SeparatingAxis b3QueryTriangleAndCapsuleEdges( const b3Vec3* vertices, 
 		// Pretend the triangle edge embeds a zero area face with a side normal. This
 		// provides a way to find an edge-edge normal that points outward from
 		// the triangle.
+		float a = b3Dot( capsuleEdge, plane.normal );
 		float b = b3Dot( capsuleEdge, sideNormal );
 
 		// Is the capsule edge parallel to the triangle edge? If so, face contact can handle it.
 		if ( a * a + b * b < squaredTolerance * b3LengthSquared( capsuleEdge ) )
 		{
-			v1 = v2;
-			edgeIndex = index;
 			continue;
 		}
 
@@ -252,7 +243,7 @@ static b3SeparatingAxis b3QueryTriangleAndCapsuleEdges( const b3Vec3* vertices, 
 	}
 
 	// Save result
-	return (b3SeparatingAxis){
+	return (b3EdgeQuery){
 		.normal = maxNormal,
 		.separation = maxSeparation,
 		.indexA = maxIndex1,
@@ -309,7 +300,7 @@ static void b3BuildTriangleAndCapsuleFaceContact( b3LocalManifold* manifold, con
 }
 
 static void b3BuildTriangleAndCapsuleEdgeContact( b3LocalManifold* manifold, const b3Vec3* triangle, b3Plane plane,
-												  const b3Capsule* capsule, b3SeparatingAxis query )
+												  const b3Capsule* capsule, b3EdgeQuery query )
 {
 	B3_ASSERT( 0 <= query.indexA && query.indexA < 3 );
 
@@ -348,8 +339,9 @@ static void b3BuildTriangleAndCapsuleEdgeContact( b3LocalManifold* manifold, con
 		return;
 	}
 
-	b3Vec3 point = b3Lerp( result.point1, b3MulSub( result.point2, capsule->radius, normal ), 0.5f );
+	b3Vec3 point = b3Lerp( b3MulSub( result.point1, capsule->radius, normal ), result.point2, 0.5f );
 	float separation = b3Dot( normal, b3Sub( p1, v1 ) );
+	B3_VALIDATE( b3AbsFloat( separation - query.separation ) < B3_LINEAR_SLOP );
 
 	manifold->normal = normal;
 	manifold->pointCount = 1;
@@ -363,7 +355,7 @@ static void b3BuildTriangleAndCapsuleEdgeContact( b3LocalManifold* manifold, con
 	pt->pair = b3MakeFeaturePair( b3_featureShapeA, query.indexA, b3_featureShapeB, query.indexB );
 }
 
-void b3CollideTriangleAndCapsule( b3LocalManifold* manifold, int capacity, const b3Vec3* triangleA, const b3Capsule* capsuleB,
+void b3CollideCapsuleAndTriangle( b3LocalManifold* manifold, int capacity, const b3Capsule* capsuleA, const b3Vec3* triangleB,
 								  b3SimplexCache* cache )
 {
 	manifold->pointCount = 0;
@@ -373,9 +365,9 @@ void b3CollideTriangleAndCapsule( b3LocalManifold* manifold, int capacity, const
 		return;
 	}
 
-	b3Vec3 v1 = triangleA[0], v2 = triangleA[1], v3 = triangleA[2];
+	b3Vec3 v1 = triangleB[0], v2 = triangleB[1], v3 = triangleB[2];
 	b3Plane plane = b3MakePlaneFromPoints( v1, v2, v3 );
-	b3Vec3 capsuleCenter = b3Lerp( capsuleB->center1, capsuleB->center2, 0.5f );
+	b3Vec3 capsuleCenter = b3Lerp( capsuleA->center1, capsuleA->center2, 0.5f );
 
 	float offset = b3PlaneSeparation( plane, capsuleCenter );
 	if ( offset < 0.0f )
@@ -385,15 +377,15 @@ void b3CollideTriangleAndCapsule( b3LocalManifold* manifold, int capacity, const
 	}
 
 	b3DistanceInput distanceInput;
-	distanceInput.proxyA = (b3ShapeProxy){ triangleA, 3, 0.0f };
-	distanceInput.proxyB = (b3ShapeProxy){ &capsuleB->center1, 2, 0.0f };
+	distanceInput.proxyA = (b3ShapeProxy){ triangleB, 3, 0.0f };
+	distanceInput.proxyB = (b3ShapeProxy){ &capsuleA->center1, 2, 0.0f };
 	distanceInput.transform = b3Transform_identity;
 	distanceInput.useRadii = false;
 
 	b3DistanceOutput distanceOutput = b3ShapeDistance( &distanceInput, cache, NULL, 0 );
-	float speculativeDistance = B3_SPECULATIVE_DISTANCE;
-	float radius = capsuleB->radius;
-	if ( distanceOutput.distance > radius + speculativeDistance )
+
+	float radius = capsuleA->radius;
+	if ( distanceOutput.distance > radius + B3_SPECULATIVE_DISTANCE )
 	{
 		// Shapes are separated, persist the cache
 		return;
@@ -411,14 +403,14 @@ void b3CollideTriangleAndCapsule( b3LocalManifold* manifold, int capacity, const
 		{
 			// Clip capsule segment against side planes of reference face
 			b3ClipVertex segment[2];
-			segment[0].position = capsuleB->center1;
+			segment[0].position = capsuleA->center1;
 			segment[0].separation = 0.0f;
 			segment[0].pair = b3MakeFeaturePair( b3_featureShapeA, 0, b3_featureShapeA, 0 );
-			segment[1].position = capsuleB->center2;
+			segment[1].position = capsuleA->center2;
 			segment[1].separation = 0.0f;
 			segment[1].pair = b3MakeFeaturePair( b3_featureShapeA, 1, b3_featureShapeA, 1 );
 
-			bool havePoints = b3ClipSegmentToTriangleFace( segment, triangleA, plane );
+			bool havePoints = b3ClipSegmentToTriangleFace( segment, triangleB, plane );
 
 			if ( havePoints == true )
 			{
@@ -429,7 +421,6 @@ void b3CollideTriangleAndCapsule( b3LocalManifold* manifold, int capacity, const
 				b3Vec3 point1 = b3MulSub( segment[0].position, 0.5f * ( radius + distance1 ), normal );
 				b3Vec3 point2 = b3MulSub( segment[1].position, 0.5f * ( radius + distance2 ), normal );
 
-				// Normal points from triangle to capsule
 				manifold->normal = normal;
 				manifold->feature = b3_featureTriangleFace;
 				manifold->pointCount = 2;
@@ -448,10 +439,9 @@ void b3CollideTriangleAndCapsule( b3LocalManifold* manifold, int capacity, const
 			}
 		}
 
-		// Create contact from closest points.
-		b3Vec3 point = b3Lerp( distanceOutput.pointA, b3MulSub( distanceOutput.pointB, radius, delta ), 0.5f );
+		// Create contact from closest points
+		b3Vec3 point = b3MulSV( 0.5f, b3Add( b3Sub( distanceOutput.pointA, b3MulSV( radius, delta ) ), distanceOutput.pointB ) );
 
-		// Normal points from triangle to capsule.
 		manifold->normal = delta;
 		manifold->pointCount = 1;
 		manifold->feature = b3GetTriangleFeature( cache );
@@ -466,44 +456,38 @@ void b3CollideTriangleAndCapsule( b3LocalManifold* manifold, int capacity, const
 
 	// Deep penetration
 
-	b3SeparatingAxis faceQuery = b3QueryTriangleFaceAndCapsule( plane, capsuleB );
+	b3FaceQuery faceQuery = b3QueryTriangleFaceAndCapsule( plane, capsuleA );
 	if ( faceQuery.separation > radius )
 	{
-		// Shapes are separated. Should be impossible for a reasonable capsule radius.
+		// Shapes are separated
 		return;
 	}
 
-	b3SeparatingAxis edgeQuery = b3QueryTriangleAndCapsuleEdges( triangleA, plane, capsuleB );
+	b3EdgeQuery edgeQuery = b3QueryTriangleAndCapsuleEdges( triangleB, plane, capsuleA );
 	if ( edgeQuery.separation > radius )
 	{
-		// Shapes are separated. Should be impossible for a reasonable capsule radius.
+		// Shapes are separated
 		return;
 	}
 
 	// Create face contact
 	float faceSeparation = faceQuery.separation - radius;
-	b3BuildTriangleAndCapsuleFaceContact( manifold, triangleA, plane, capsuleB );
-	B3_VALIDATE( manifold->pointCount == 0 || manifold->pointCount == 2 );
+	b3BuildTriangleAndCapsuleFaceContact( manifold, triangleB, plane, capsuleA );
 	if ( manifold->pointCount == 2 )
 	{
-		// This becomes the clipped separation.
 		faceSeparation = b3MinFloat( manifold->points[0].separation, manifold->points[1].separation );
 	}
-
-	if ( edgeQuery.indexA == B3_NULL_INDEX )
-	{
-		// No valid edge contact.
-		return;
-	}
+	B3_VALIDATE( faceSeparation <= 0.0f );
 
 	// Face contact can be empty if it does not realize the axis of minimum penetration.
 	// Create edge contact if face contact fails or edge contact is significantly better!
-	float linearSlop = B3_LINEAR_SLOP;
+	const float kRelEdgeTolerance = 0.50f;
+	const float kAbsTolerance = 1.0f * B3_LINEAR_SLOP;
 	float edgeSeparation = edgeQuery.separation - radius;
-	if ( manifold->pointCount == 0 || edgeSeparation > faceSeparation + linearSlop )
+	if ( manifold->pointCount == 0 || edgeSeparation > kRelEdgeTolerance * faceSeparation + kAbsTolerance )
 	{
 		// Edge contact
-		b3BuildTriangleAndCapsuleEdgeContact( manifold, triangleA, plane, capsuleB, edgeQuery );
+		b3BuildTriangleAndCapsuleEdgeContact( manifold, triangleB, plane, capsuleA, edgeQuery );
 	}
 }
 
@@ -528,35 +512,31 @@ static inline int b3GetTriangleSupport( b3Vec3* points, b3Vec3 direction )
 	return index;
 }
 
-static b3SeparatingAxis b3QueryTriangleFace( const b3TriangleData* triangle, const b3HullData* hull )
+static b3FaceQuery b3QueryTriangleFace( const b3TriangleData* triangle, const b3HullData* hull )
 {
 	const b3Vec3* hullPoints = b3GetHullPoints( hull );
 	b3Plane plane = triangle->plane;
-	b3Vec3 normal = b3Neg( plane.normal );
-	int vertexIndex = b3FindHullSupportVertex( hull, normal );
+	int vertexIndex = b3FindHullSupportVertex( hull, b3Neg( plane.normal ) );
 	b3Vec3 support = hullPoints[vertexIndex];
 	float separation = b3PlaneSeparation( plane, support );
 
-	return (b3SeparatingAxis){
-		.normal = plane.normal,
+	return (b3FaceQuery){
 		.separation = separation,
-		.indexA = 0,
-		.indexB = vertexIndex,
-		.type = b3_faceAxisA,
+		.faceIndex = 0,
+		.vertexIndex = (uint8_t)vertexIndex,
 	};
 }
 
-static b3SeparatingAxis b3QueryHullFace( const b3TriangleData* triangle, const b3HullData* hull )
+static b3FaceQuery b3QueryHullFace( const b3TriangleData* triangle, const b3HullData* hull )
 {
 	const b3Plane* hullPlanes = b3GetHullPlanes( hull );
 	int faceCount = hull->faceCount;
 
 	b3Vec3 trianglePoints[] = { triangle->v1, triangle->v2, triangle->v3 };
 
-	b3Vec3 maxNormal = b3Vec3_zero;
-	float maxFaceSeparation = -INFINITY;
-	int maxFaceIndex = B3_NULL_INDEX;
-	int maxVertexIndex = B3_NULL_INDEX;
+	int maxFaceIndex = -1;
+	int maxVertexIndex = -1;
+	float maxFaceSeparation = -FLT_MAX;
 
 	for ( int faceIndex = 0; faceIndex < faceCount; ++faceIndex )
 	{
@@ -567,32 +547,26 @@ static b3SeparatingAxis b3QueryHullFace( const b3TriangleData* triangle, const b
 		float separation = b3PlaneSeparation( plane, support );
 		if ( separation > maxFaceSeparation )
 		{
-			maxNormal = plane.normal;
-			maxFaceSeparation = separation;
 			maxFaceIndex = faceIndex;
 			maxVertexIndex = vertexIndex;
+			maxFaceSeparation = separation;
 		}
 	}
 
-	// Normal points from triangle to hull
-	return (b3SeparatingAxis){
-		.normal = b3Neg( maxNormal ),
+	return (b3FaceQuery){
 		.separation = maxFaceSeparation,
-		.indexA = maxVertexIndex,
-		.indexB = maxFaceIndex,
-		.type = b3_faceAxisB,
+		.faceIndex = maxFaceIndex,
+		.vertexIndex = maxVertexIndex,
 	};
 }
 
-// A: hull, B: triangle
-static b3SeparatingAxis b3QueryTriangleAndHullEdges( const b3TriangleData* triangle, const b3HullData* hull )
+static b3EdgeQuery b3QueryTriangleAndHullEdges( const b3TriangleData* triangle, const b3HullData* hull )
 {
-	b3SeparatingAxis result = {
+	b3EdgeQuery result = {
 		.normal = b3Vec3_zero,
-		.separation = -INFINITY,
+		.separation = -FLT_MAX,
 		.indexA = B3_NULL_INDEX,
 		.indexB = B3_NULL_INDEX,
-		.type = b3_edgePairAxis,
 	};
 
 	b3Vec3 trianglePoints[] = { triangle->v1, triangle->v2, triangle->v3 };
@@ -671,12 +645,8 @@ static b3SeparatingAxis b3QueryTriangleAndHullEdges( const b3TriangleData* trian
 }
 
 static float b3CollideHullFace( b3LocalManifold* manifold, int pointCapacity, const b3TriangleData* triangle,
-								const b3HullData* hull, b3SeparatingAxis query, b3SATCache* cache, bool enableSpeculative )
+								const b3HullData* hull, b3FaceQuery query, b3SATCache* cache, bool enableSpeculative )
 {
-	B3_VALIDATE( query.type == b3_faceAxisB );
-	B3_VALIDATE( 0 <= query.indexA && query.indexA < 3 );
-	B3_VALIDATE( 0 <= query.indexB && query.indexB < hull->faceCount );
-
 	manifold->pointCount = 0;
 
 	const b3HullFace* hullFaces = b3GetHullFaces( hull );
@@ -685,7 +655,8 @@ static float b3CollideHullFace( b3LocalManifold* manifold, int pointCapacity, co
 	const b3Vec3* hullPoints = b3GetHullPoints( hull );
 
 	// Reference hull face
-	b3Plane refPlane = hullPlanes[query.indexB];
+	int refFace = query.faceIndex;
+	b3Plane refPlane = hullPlanes[refFace];
 
 	// Build clip polygon from triangle face (the incident face)
 	b3ClipVertex buffer1[B3_MAX_CLIP_POINTS], buffer2[B3_MAX_CLIP_POINTS];
@@ -708,7 +679,7 @@ static float b3CollideHullFace( b3LocalManifold* manifold, int pointCapacity, co
 	b3ClipVertex* input = buffer1;
 	b3ClipVertex* output = buffer2;
 
-	const b3HullFace* face = hullFaces + query.indexB;
+	const b3HullFace* face = hullFaces + refFace;
 	int edgeIndex = face->edge;
 
 	do
@@ -780,17 +751,14 @@ static float b3CollideHullFace( b3LocalManifold* manifold, int pointCapacity, co
 	// Save cache
 	cache->separation = minSeparation;
 	cache->type = b3_faceAxisB;
-	cache->indexA = (uint8_t)query.indexA;
-	cache->indexB = (uint8_t)query.indexB;
+	cache->indexA = (uint8_t)query.vertexIndex;
+	cache->indexB = (uint8_t)query.faceIndex;
 	return minSeparation;
 }
 
 static float b3CollideTriangleFace( b3LocalManifold* manifold, int pointCapacity, const b3TriangleData* triangle,
-									const b3HullData* hull, b3SeparatingAxis query, b3SATCache* cache, bool enableSpeculative )
+									const b3HullData* hull, b3FaceQuery query, b3SATCache* cache, bool enableSpeculative )
 {
-	B3_VALIDATE( query.type == b3_faceAxisA );
-	B3_VALIDATE( query.indexA == 0 );
-	B3_VALIDATE( 0 <= query.indexB && query.indexB < hull->vertexCount );
 	B3_VALIDATE( manifold->pointCount == 0 );
 
 	const b3HullFace* hullFaces = b3GetHullFaces( hull );
@@ -798,9 +766,10 @@ static float b3CollideTriangleFace( b3LocalManifold* manifold, int pointCapacity
 	const b3Vec3* hullPoints = b3GetHullPoints( hull );
 
 	// Find incident face
+	B3_ASSERT( query.faceIndex == 0 );
 	b3Plane refPlane = triangle->plane;
 
-	int incFace = b3FindIncidentFace( hull, refPlane.normal, query.indexB );
+	int incFace = b3FindIncidentFace( hull, refPlane.normal, query.vertexIndex );
 
 	// Build clip polygon from incident face
 	b3ClipVertex buffer1[2 * B3_MAX_CLIP_POINTS], buffer2[2 * B3_MAX_CLIP_POINTS];
@@ -896,18 +865,16 @@ static float b3CollideTriangleFace( b3LocalManifold* manifold, int pointCapacity
 	// Save cache
 	cache->separation = minSeparation;
 	cache->type = b3_faceAxisA;
-	cache->indexA = (uint8_t)query.indexA;
-	cache->indexB = (uint8_t)query.indexB;
+	cache->indexA = (uint8_t)query.faceIndex;
+	cache->indexB = (uint8_t)query.vertexIndex;
 	return minSeparation;
 }
 
-static void b3CollideTriangleAndHullEdges( b3LocalManifold* manifold, int capacity, b3Vec3 trianglePoint, b3Vec3 triangleEdge,
-										   const b3HullData* hull, b3SeparatingAxis query, b3SATCache* cache )
+static void b3CollideHullAndTriangleEdges( b3LocalManifold* manifold, int capacity, b3Vec3 trianglePoint, b3Vec3 triangleEdge,
+										   const b3HullData* hull, b3EdgeQuery query, b3SATCache* cache )
 {
-	B3_VALIDATE( query.type == b3_edgePairAxis );
-	B3_VALIDATE( 0 <= query.indexA && query.indexA < 3 );
-	B3_VALIDATE( 0 <= query.indexB && query.indexB < hull->edgeCount );
 	B3_VALIDATE( query.separation <= 2.0f * B3_SPECULATIVE_DISTANCE );
+	B3_ASSERT( query.indexA < 3 );
 
 	b3Vec3 pA = trianglePoint;
 	b3Vec3 eA = triangleEdge;
@@ -933,7 +900,10 @@ static void b3CollideTriangleAndHullEdges( b3LocalManifold* manifold, int capaci
 		return;
 	}
 
+	// This can slide off the end from caching
 	float separation = b3Dot( query.normal, b3Sub( pB, pA ) );
+	B3_VALIDATE( b3AbsFloat( separation - query.separation ) < B3_LINEAR_SLOP );
+
 	b3Vec3 point = b3MulSV( 0.5f, b3Add( result.point1, result.point2 ) );
 
 	b3LocalManifoldPoint* pt = manifold->points + 0;
@@ -957,9 +927,9 @@ static void b3CollideTriangleAndHullEdges( b3LocalManifold* manifold, int capaci
 b3AtomicInt b3_triangleConvexCalls;
 b3AtomicInt b3_triangleCacheHits;
 
-// Triangle is in the local space of the hull for efficiency.
-void b3CollideTriangleAndHull( b3LocalManifold* manifold, int capacity, b3Vec3 v1, b3Vec3 v2, b3Vec3 v3, int triangleFlags,
-							   const b3HullData* hullB, b3SATCache* cache, bool enableSpeculative )
+// Computes the manifold in the local space of the hull
+void b3CollideHullAndTriangle( b3LocalManifold* manifold, int capacity, const b3HullData* hullA, b3Vec3 v1, b3Vec3 v2, b3Vec3 v3,
+							   int triangleFlags, b3SATCache* cache, bool enableSpeculative )
 {
 	manifold->pointCount = 0;
 	manifold->feature = b3_featureNone;
@@ -972,7 +942,7 @@ void b3CollideTriangleAndHull( b3LocalManifold* manifold, int capacity, b3Vec3 v
 	b3Plane trianglePlane = b3MakePlaneFromPoints( v1, v2, v3 );
 	float linearSlop = B3_LINEAR_SLOP;
 
-	float offset = b3PlaneSeparation( trianglePlane, hullB->center );
+	float offset = b3PlaneSeparation( trianglePlane, hullA->center );
 	if ( cache->type == b3_backsideAxis )
 	{
 		// Use hysteresis to avoid jitter on wavy meshes
@@ -1006,9 +976,9 @@ void b3CollideTriangleAndHull( b3LocalManifold* manifold, int capacity, b3Vec3 v
 		.flags = triangleFlags,
 	};
 
-	const b3HullHalfEdge* edges = b3GetHullEdges( hullB );
-	const b3Plane* hullPlanes = b3GetHullPlanes( hullB );
-	const b3Vec3* hullPoints = b3GetHullPoints( hullB );
+	const b3HullHalfEdge* edges = b3GetHullEdges( hullA );
+	const b3Plane* hullPlanes = b3GetHullPlanes( hullA );
+	const b3Vec3* hullPoints = b3GetHullPoints( hullA );
 
 	float speculativeDistance = enableSpeculative ? B3_SPECULATIVE_DISTANCE : 0.0f;
 	cache->hit = 1;
@@ -1020,7 +990,7 @@ void b3CollideTriangleAndHull( b3LocalManifold* manifold, int capacity, b3Vec3 v
 		{
 			B3_ASSERT( cache->indexA == 0 );
 
-			int vertexIndex = b3FindHullSupportVertex( hullB, b3Neg( trianglePlane.normal ) );
+			int vertexIndex = b3FindHullSupportVertex( hullA, b3Neg( trianglePlane.normal ) );
 			b3Vec3 support = hullPoints[vertexIndex];
 			float separation = b3PlaneSeparation( trianglePlane, support );
 			if ( separation > speculativeDistance )
@@ -1029,17 +999,15 @@ void b3CollideTriangleAndHull( b3LocalManifold* manifold, int capacity, b3Vec3 v
 				return;
 			}
 
-			b3SeparatingAxis faceQuery;
-			faceQuery.normal = trianglePlane.normal;
+			b3FaceQuery faceQuery;
 			faceQuery.separation = separation;
-			faceQuery.indexA = cache->indexA;
-			faceQuery.indexB = vertexIndex;
-			faceQuery.type = b3_faceAxisA;
+			faceQuery.faceIndex = cache->indexA;
+			faceQuery.vertexIndex = vertexIndex;
 
 			// Read cache but don't modify it
 			b3SATCache localCache = *cache;
 			float clippedSeparation =
-				b3CollideTriangleFace( manifold, capacity, &triangle, hullB, faceQuery, &localCache, enableSpeculative );
+				b3CollideTriangleFace( manifold, capacity, &triangle, hullA, faceQuery, &localCache, enableSpeculative );
 
 			if ( manifold->pointCount > 0 && b3AbsFloat( cache->separation - clippedSeparation ) < linearSlop )
 			{
@@ -1055,7 +1023,7 @@ void b3CollideTriangleAndHull( b3LocalManifold* manifold, int capacity, b3Vec3 v
 
 		case b3_faceAxisB:
 		{
-			B3_ASSERT( cache->indexB < hullB->faceCount );
+			B3_ASSERT( cache->indexB < hullA->faceCount );
 
 			b3Plane plane = hullPlanes[cache->indexB];
 
@@ -1090,17 +1058,15 @@ void b3CollideTriangleAndHull( b3LocalManifold* manifold, int capacity, b3Vec3 v
 			if ( isDeep == false )
 			{
 				//  Try to rebuild contact from last features
-				b3SeparatingAxis faceQuery;
-				faceQuery.normal = b3Neg( plane.normal );
+				b3FaceQuery faceQuery;
 				faceQuery.separation = separation;
-				faceQuery.indexA = vertexIndex;
-				faceQuery.indexB = cache->indexB;
-				faceQuery.type = b3_faceAxisB;
+				faceQuery.faceIndex = cache->indexB;
+				faceQuery.vertexIndex = vertexIndex;
 
 				// Read cache but don't modify it
 				b3SATCache localCache = *cache;
 				float clippedSeparation =
-					b3CollideHullFace( manifold, capacity, &triangle, hullB, faceQuery, &localCache, enableSpeculative );
+					b3CollideHullFace( manifold, capacity, &triangle, hullA, faceQuery, &localCache, enableSpeculative );
 
 				// Cache reuse is only successful if it creates contact points and the clipped separation didn't change much.
 				if ( manifold->pointCount > 0 && b3AbsFloat( cache->separation - clippedSeparation ) < linearSlop )
@@ -1124,7 +1090,7 @@ void b3CollideTriangleAndHull( b3LocalManifold* manifold, int capacity, b3Vec3 v
 			b3Vec3 triPoint = trianglePoints[indexA];
 			b3Vec3 triEdge = triangleEdges[indexA];
 
-			B3_ASSERT( cache->indexB < hullB->edgeCount - 1 );
+			B3_ASSERT( cache->indexB < hullA->edgeCount - 1 );
 			int indexB = cache->indexB;
 
 			const b3HullHalfEdge* edge2 = edges + indexB;
@@ -1168,16 +1134,15 @@ void b3CollideTriangleAndHull( b3LocalManifold* manifold, int capacity, b3Vec3 v
 					{
 						// Try to rebuild contact from last features
 						// Flip normal to point from triangle to hull
-						b3SeparatingAxis edgeQuery;
+						b3EdgeQuery edgeQuery;
 						edgeQuery.normal = b3Neg( axis );
 						edgeQuery.indexA = indexA;
 						edgeQuery.indexB = indexB;
 						edgeQuery.separation = separation;
-						edgeQuery.type = b3_edgePairAxis;
 
 						// Read cache but don't modify it
 						b3SATCache localCache = *cache;
-						b3CollideTriangleAndHullEdges( manifold, capacity, triPoint, triEdge, hullB, edgeQuery, &localCache );
+						b3CollideHullAndTriangleEdges( manifold, capacity, triPoint, triEdge, hullA, edgeQuery, &localCache );
 
 						if ( manifold->pointCount > 0 )
 						{
@@ -1196,28 +1161,28 @@ void b3CollideTriangleAndHull( b3LocalManifold* manifold, int capacity, b3Vec3 v
 			// This case is for testing
 		case b3_manualFaceAxisA:
 		{
-			b3SeparatingAxis query = b3QueryTriangleFace( &triangle, hullB );
-			b3CollideTriangleFace( manifold, capacity, &triangle, hullB, query, cache, enableSpeculative );
+			b3FaceQuery faceQueryA = b3QueryTriangleFace( &triangle, hullA );
+			b3CollideTriangleFace( manifold, capacity, &triangle, hullA, faceQueryA, cache, enableSpeculative );
 			return;
 		}
 
 			// This case is for testing
 		case b3_manualFaceAxisB:
 		{
-			b3SeparatingAxis query = b3QueryHullFace( &triangle, hullB );
-			b3CollideHullFace( manifold, capacity, &triangle, hullB, query, cache, enableSpeculative );
+			b3FaceQuery faceQueryB = b3QueryHullFace( &triangle, hullA );
+			b3CollideHullFace( manifold, capacity, &triangle, hullA, faceQueryB, cache, enableSpeculative );
 			return;
 		}
 
 			// This case is for testing
 		case b3_manualEdgePairAxis:
 		{
-			b3SeparatingAxis query = b3QueryTriangleAndHullEdges( &triangle, hullB );
-			if ( query.indexA != B3_NULL_INDEX )
+			b3EdgeQuery edgeQuery = b3QueryTriangleAndHullEdges( &triangle, hullA );
+			if ( edgeQuery.indexA != B3_NULL_INDEX )
 			{
-				b3Vec3 trianglePoint = trianglePoints[query.indexA];
-				b3Vec3 triangleEdge = triangleEdges[query.indexA];
-				b3CollideTriangleAndHullEdges( manifold, capacity, trianglePoint, triangleEdge, hullB, query, cache );
+				b3Vec3 trianglePoint = trianglePoints[edgeQuery.indexA];
+				b3Vec3 triangleEdge = triangleEdges[edgeQuery.indexA];
+				b3CollideHullAndTriangleEdges( manifold, capacity, trianglePoint, triangleEdge, hullA, edgeQuery, cache );
 			}
 			return;
 		}
@@ -1231,29 +1196,29 @@ void b3CollideTriangleAndHull( b3LocalManifold* manifold, int capacity, b3Vec3 v
 	cache->hit = 0;
 
 	// Find axis of minimum penetration
-	b3SeparatingAxis faceQueryA = b3QueryTriangleFace( &triangle, hullB );
+	b3FaceQuery faceQueryA = b3QueryTriangleFace( &triangle, hullA );
 	if ( faceQueryA.separation > speculativeDistance )
 	{
 		// Separating axis found
 		cache->separation = faceQueryA.separation;
 		cache->type = b3_faceAxisA;
-		cache->indexA = (uint8_t)faceQueryA.indexA;
-		cache->indexB = (uint8_t)faceQueryA.indexB;
+		cache->indexA = 0;
+		cache->indexB = UINT8_MAX;
 		return;
 	}
 
-	b3SeparatingAxis faceQueryB = b3QueryHullFace( &triangle, hullB );
+	b3FaceQuery faceQueryB = b3QueryHullFace( &triangle, hullA );
 	if ( faceQueryB.separation > speculativeDistance )
 	{
 		// Separating axis found
 		cache->separation = faceQueryB.separation;
 		cache->type = b3_faceAxisB;
-		cache->indexA = (uint8_t)faceQueryB.indexA;
-		cache->indexB = (uint8_t)faceQueryB.indexB;
+		cache->indexA = UINT8_MAX;
+		cache->indexB = (uint8_t)faceQueryB.faceIndex;
 		return;
 	}
 
-	b3SeparatingAxis edgeQuery = b3QueryTriangleAndHullEdges( &triangle, hullB );
+	b3EdgeQuery edgeQuery = b3QueryTriangleAndHullEdges( &triangle, hullA );
 	if ( edgeQuery.separation > speculativeDistance )
 	{
 		// Separating axis found
@@ -1264,18 +1229,20 @@ void b3CollideTriangleAndHull( b3LocalManifold* manifold, int capacity, b3Vec3 v
 		return;
 	}
 
-	float clipSeparation;
+	float clippedFaceSeparation;
 
 	// Don't admit a hull face significantly opposed to the triangle face.
 	// Need a tolerance to avoid ghost collisions.
-	bool pushingDown = b3Dot( faceQueryB.normal, trianglePlane.normal ) < -0.25f;
+	b3Vec3 hullNormal = hullPlanes[faceQueryB.faceIndex].normal;
+	bool pushingDown = b3Dot( hullNormal, trianglePlane.normal ) > 0.25f;
 	if ( faceQueryB.separation >= faceQueryA.separation && pushingDown == false )
 	{
-		clipSeparation = b3CollideHullFace( manifold, capacity, &triangle, hullB, faceQueryB, cache, enableSpeculative );
+		clippedFaceSeparation = b3CollideHullFace( manifold, capacity, &triangle, hullA, faceQueryB, cache, enableSpeculative );
 	}
 	else
 	{
-		clipSeparation = b3CollideTriangleFace( manifold, capacity, &triangle, hullB, faceQueryA, cache, enableSpeculative );
+		clippedFaceSeparation =
+			b3CollideTriangleFace( manifold, capacity, &triangle, hullA, faceQueryA, cache, enableSpeculative );
 	}
 
 	// Does an edge axis exist?
@@ -1286,13 +1253,13 @@ void b3CollideTriangleAndHull( b3LocalManifold* manifold, int capacity, b3Vec3 v
 		float maxFaceSeparation = b3MaxFloat( faceQueryA.separation, faceQueryB.separation );
 
 		if ( ( manifold->pointCount == 0 && edgeQuery.separation > maxFaceSeparation ) ||
-			 ( manifold->pointCount == 1 && edgeQuery.separation > clipSeparation + linearSlop ) )
+			 ( manifold->pointCount == 1 && edgeQuery.separation > clippedFaceSeparation + linearSlop ) )
 		{
 			B3_ASSERT( 0 <= edgeQuery.indexA && edgeQuery.indexA < 3 );
 			b3Vec3 trianglePoint = trianglePoints[edgeQuery.indexA];
 			b3Vec3 triangleEdge = triangleEdges[edgeQuery.indexA];
 			manifold->pointCount = 0;
-			b3CollideTriangleAndHullEdges( manifold, capacity, trianglePoint, triangleEdge, hullB, edgeQuery, cache );
+			b3CollideHullAndTriangleEdges( manifold, capacity, trianglePoint, triangleEdge, hullA, edgeQuery, cache );
 		}
 	}
 
@@ -1307,7 +1274,7 @@ void b3CollideTriangleAndHull( b3LocalManifold* manifold, int capacity, b3Vec3 v
 			.count = 3,
 			.radius = 0.0f,
 		};
-		input.proxyB = (b3ShapeProxy){ .points = hullPoints, .count = hullB->vertexCount, .radius = 0.0f };
+		input.proxyB = (b3ShapeProxy){ .points = hullPoints, .count = hullA->vertexCount, .radius = 0.0f };
 		input.transform = b3Transform_identity;
 		input.useRadii = false;
 
@@ -1327,8 +1294,5 @@ void b3CollideTriangleAndHull( b3LocalManifold* manifold, int capacity, b3Vec3 v
 			// This feature pair not accurate but maybe it doesn't matter
 			manifold->points[0].pair = b3FeaturePair_single;
 		}
-
-		// No way to cache this scenario
-		*cache = (b3SATCache){ 0 };
 	}
 }

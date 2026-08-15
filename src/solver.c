@@ -13,19 +13,18 @@
 #include "ctz.h"
 #include "island.h"
 #include "joint.h"
-#include "joint_solver.h"
 #include "parallel_for.h"
 #include "physics_world.h"
 #include "platform.h"
 #include "sensor.h"
 #include "shape.h"
 #include "solver_set.h"
+#include "voxel_shape.h" // b3VoxelData accessors for the voxel CCD proxy
 
+#include <float.h>
 #include <limits.h>
 #include <stddef.h>
 #include <stdio.h>
-
-_Static_assert( B3_RESTITUTION_ITERATIONS >= 1, "must be 1 or more" );
 
 // these are useful for solver testing
 #define ITERATIONS 1
@@ -313,42 +312,6 @@ static void b3SolveJointsTask( b3SolverBlock block, b3StepContext* context, bool
 	b3TracyCZoneEnd( solve_joints );
 }
 
-// Sequential impulse skips fully-owned equalities, so reaction events for those
-// joints (and mixed joints whose point-to-point impulse is filled by Direct)
-// must be sampled after the island solve.
-static void b3FlagJointEventsAfterDirect( b3StepContext* context )
-{
-	b3World* world = context->world;
-	if ( world->taskContexts.count == 0 )
-	{
-		return;
-	}
-
-	b3BitSet* jointStateBitSet = &world->taskContexts.data[0].jointStateBitSet;
-	b3ConstraintGraph* graph = context->graph;
-
-	for ( int colorIndex = 0; colorIndex < B3_GRAPH_COLOR_COUNT; ++colorIndex )
-	{
-		b3GraphColor* color = graph->colors + colorIndex;
-		int count = color->jointSims.count;
-		b3JointSim* joints = color->jointSims.data;
-		for ( int i = 0; i < count; ++i )
-		{
-			b3JointSim* joint = joints + i;
-			if ( ( joint->forceThreshold < FLT_MAX || joint->torqueThreshold < FLT_MAX ) &&
-				 b3GetBit( jointStateBitSet, joint->jointId ) == false )
-			{
-				float force, torque;
-				b3GetJointReaction( world, joint, context->inv_h, &force, &torque );
-				if ( force >= joint->forceThreshold || torque >= joint->torqueThreshold )
-				{
-					b3SetBit( jointStateBitSet, joint->jointId );
-				}
-			}
-		}
-	}
-}
-
 #define B2_MAX_CONTINUOUS_SENSOR_HITS 8
 
 typedef struct b3ContinuousContext
@@ -456,7 +419,66 @@ static bool b3ContinuousQueryCallback( int proxyId, uint64_t userData, void* con
 	b3Sweep sweepA = b3MakeRelativeSweep( bodySim, continuousContext->base );
 
 	// Time of impact versus shape. Supports all shape types
-	b3TOIOutput output = b3ShapeTimeOfImpact( shape, fastShape, &sweepA, &continuousContext->sweep, continuousContext->fraction );
+	b3TOIOutput output;
+	bool fastIsVoxel = fastShape->type == b3_voxelShape;
+	if ( shape->type == b3_voxelShape || fastIsVoxel )
+	{
+		// The GJK time of impact cannot represent a voxel grid, so sweep a proxy of
+		// the fast shape with a translation-only shape cast instead. Rotation over the
+		// sweep is ignored: the angular clamp bounds the error, except for bodies with
+		// b3_allowFastRotation, which trade CCD accuracy for spin. Hulls beyond
+		// B3_MAX_SHAPE_CAST_POINTS vertices are swept as a truncated point cloud.
+		output = ( b3TOIOutput ){ 0 };
+		output.fraction = continuousContext->fraction; // default: no earlier hit
+
+		b3Vec3 points[B3_MAX_SHAPE_CAST_POINTS];
+		b3ShapeCastInput castInput = { 0 };
+		if ( fastIsVoxel )
+		{
+			// A voxel grid has no convex proxy: sweep the largest sphere that fits
+			// inside its bounds at the centroid. Tunneling of the parts outside the
+			// sphere is then bounded and the discrete solver resolves them.
+			b3AABB fastBounds = b3VoxelData_GetBounds( fastShape->voxel );
+			b3Vec3 c = fastShape->localCentroid;
+			b3Vec3 d1 = b3Sub( c, fastBounds.lowerBound );
+			b3Vec3 d2 = b3Sub( fastBounds.upperBound, c );
+			float face = b3MinFloat( b3MinFloat( b3MinFloat( d1.x, d2.x ), b3MinFloat( d1.y, d2.y ) ),
+									 b3MinFloat( d1.z, d2.z ) );
+			float halfCell = 0.5f * b3VoxelData_GetVoxelSize( fastShape->voxel );
+			points[0] = continuousContext->centroid1;
+			castInput.proxy = ( b3ShapeProxy ){ points, 1, b3MaxFloat( face, halfCell ) };
+		}
+		else
+		{
+			b3Transform xfFast1 = b3GetSweepTransform( &continuousContext->sweep, 0.0f );
+			b3ShapeProxy proxy = b3MakeShapeProxy( fastShape );
+			int count = b3MinInt( proxy.count, B3_MAX_SHAPE_CAST_POINTS );
+			for ( int i = 0; i < count; ++i )
+			{
+				points[i] = b3TransformPoint( xfFast1, proxy.points[i] );
+			}
+			castInput.proxy = ( b3ShapeProxy ){ points, count, proxy.radius };
+		}
+
+		// Sweep relative to the target so moving bullet targets are respected.
+		b3Vec3 translation = b3Sub( continuousContext->centroid2, continuousContext->centroid1 );
+		translation = b3Sub( translation, b3Sub( sweepA.c2, sweepA.c1 ) );
+		castInput.translation = translation;
+		castInput.maxFraction = continuousContext->fraction;
+
+		b3Transform xfTarget = b3GetSweepTransform( &sweepA, 1.0f );
+		b3CastOutput cast = b3ShapeCastShape( shape, xfTarget, &castInput );
+		if ( cast.hit && cast.fraction < continuousContext->fraction )
+		{
+			output.fraction = cast.fraction;
+			output.point = cast.point;
+			output.normal = cast.normal;
+		}
+	}
+	else
+	{
+		output = b3ShapeTimeOfImpact( shape, fastShape, &sweepA, &continuousContext->sweep, continuousContext->fraction );
+	}
 	if ( isSensor )
 	{
 		// Only accept a sensor hit that is sooner than the current solid hit.
@@ -564,7 +586,8 @@ static void b3SolveContinuous( b3World* world, int bodySimIndex, b3TaskContext* 
 		// Store this to avoid double computation in the case there is no impact event
 		fastShape->aabb = box2;
 
-		// No continuous collision for meshes
+		// Mesh and height-field shapes cannot be fast movers; a fast voxel shape is
+		// swept as its inscribed sphere in b3ContinuousQueryCallback.
 		if ( fastShape->type == b3_meshShape || fastShape->type == b3_heightShape )
 		{
 			continue;
@@ -729,25 +752,17 @@ static void b3FinalizeBodiesTask( int startIndex, int endIndex, int workerIndex,
 
 		b3Vec3 v = state->linearVelocity;
 		b3Vec3 w = state->angularVelocity;
-		bool unstable = ( b3IsValidVec3( v ) == false || b3IsValidVec3( w ) == false );
+		b3Vec3 localOmega = b3InvRotateVector( sim->transform.q, w );
+		b3Vec3 localDeltaRotation = b3InvRotateVector( sim->transform.q, state->deltaRotation.v );
 
-		if ( unstable )
+		if ( b3IsValidVec3( v ) == false || b3IsValidVec3( w ) == false )
 		{
 			const char* name = b3FindNameWithDefault( &world->names, bodies[sim->bodyId].nameId, "NULL" );
 			b3Log( "unstable: %s", name );
-
-			// NaN compares false against the sleep threshold, so these bodies would
-			// otherwise freeze in the exploded pose. Zero motion and keep them awake.
-			v = b3Vec3_zero;
-			w = b3Vec3_zero;
-			state->linearVelocity = v;
-			state->angularVelocity = w;
-			state->deltaPosition = b3Vec3_zero;
-			state->deltaRotation = b3Quat_identity;
 		}
 
-		b3Vec3 localOmega = b3InvRotateVector( sim->transform.q, w );
-		b3Vec3 localDeltaRotation = b3InvRotateVector( sim->transform.q, state->deltaRotation.v );
+		B3_ASSERT( b3IsValidVec3( v ) );
+		B3_ASSERT( b3IsValidVec3( w ) );
 
 		sim->center = b3OffsetPos( sim->center, state->deltaPosition );
 		sim->transform.q = b3NormalizeQuat( b3MulQuat( state->deltaRotation, sim->transform.q ) );
@@ -765,10 +780,6 @@ static void b3FinalizeBodiesTask( int startIndex, int endIndex, int workerIndex,
 		// Position correction is not as important for sleep as true velocity.
 		float positionSleepFactor = 0.5f;
 		float sleepVelocity = b3MaxFloat( maxVelocity, positionSleepFactor * invTimeStep * maxDeltaPosition );
-		if ( unstable )
-		{
-			sleepVelocity = FLT_MAX;
-		}
 
 		// reset state deltas
 		state->deltaPosition = b3Vec3_zero;
@@ -1330,11 +1341,6 @@ static void b3SolverTask( void* taskContext )
 
 			profile->solveImpulses += b3GetMillisecondsAndReset( &ticks );
 
-			// Joint equalities: island LDL / PCG. Sequential impulse in the mixed
-			// stage only does motors, limits, and springs.
-			b3SolveJoints_Direct( context, true );
-			b3FlagJointEventsAfterDirect( context );
-
 			// Integrate positions
 			B3_ASSERT( stages[iterationStageIndex].type == b3_stageIntegratePositions );
 			syncBits = ( bodySyncIndex << 16 ) | iterationStageIndex;
@@ -1362,8 +1368,6 @@ static void b3SolverTask( void* taskContext )
 			}
 
 			profile->relaxImpulses += b3GetMillisecondsAndReset( &ticks );
-
-			b3SolveJoints_Direct( context, false );
 		}
 
 		// Advance the stage according to the sub-stepping tasks just completed
@@ -1371,7 +1375,6 @@ static void b3SolverTask( void* taskContext )
 		stageIndex += 1 + activeColorCount + ITERATIONS * activeColorCount + 1 + RELAX_ITERATIONS * activeColorCount;
 
 		// Restitution
-		for ( int iteration = 0; iteration < B3_RESTITUTION_ITERATIONS; ++iteration )
 		{
 			b3ApplyRestitution_Overflow( context );
 
@@ -1383,7 +1386,7 @@ static void b3SolverTask( void* taskContext )
 				b3ExecuteMainStage( stages + iterStageIndex, context, syncBits );
 				iterStageIndex += 1;
 			}
-			graphSyncIndex += 1;
+			// graphSyncIndex += 1;
 			stageIndex += activeColorCount;
 		}
 
@@ -1749,7 +1752,7 @@ void b3Solve( b3World* world, b3StepContext* stepContext )
 		// b3_stageRelax
 		stageCount += RELAX_ITERATIONS * activeColorCount;
 		// b3_stageRestitution
-		stageCount += B3_RESTITUTION_ITERATIONS * activeColorCount;
+		stageCount += activeColorCount;
 		// b3_stageStoreWideImpulses
 		stageCount += 1;
 		// b3_stageStoreImpulses
@@ -1834,8 +1837,8 @@ void b3Solve( b3World* world, b3StepContext* stepContext )
 		stage = b3InitColorStages( stage, b3_stageRelax, RELAX_ITERATIONS, activeColorCount, graphColorBlocks, graphBlockCounts,
 								   activeColorIndices );
 		// Note: joint blocks mixed in, could have joint limit restitution
-		stage = b3InitColorStages( stage, b3_stageRestitution, B3_RESTITUTION_ITERATIONS, activeColorCount, graphColorBlocks,
-								   graphBlockCounts, activeColorIndices );
+		stage = b3InitColorStages( stage, b3_stageRestitution, 1, activeColorCount, graphColorBlocks, graphBlockCounts,
+								   activeColorIndices );
 		stage = b3InitStage( stage, b3_stageStoreWideImpulses, convexBlocks, convexPrepareDim.count, UINT8_MAX );
 		stage = b3InitStage( stage, b3_stageStoreImpulses, meshBlocks, meshPrepareDim.count, UINT8_MAX );
 

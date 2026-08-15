@@ -1,189 +1,157 @@
-# Box3D
+# Vox3D
 
-[![Build Status](https://github.com/erincatto/box3d/actions/workflows/build.yml/badge.svg)](https://github.com/erincatto/box3d/actions)
-[![CLA assistant](https://cla-assistant.io/readme/badge/erincatto/box3d)](https://cla-assistant.io/erincatto/box3d)
+**A real-time voxel destruction physics engine.**
 
-![Box3D Logo](https://box2d.org/images/logo.svg)
+Vox3D is a fork of Erin Catto's [Box3D](https://github.com/erincatto/box3d)
+specialized for **voxel structures**: it adds a built-in
+structural-stress and fracture engine so voxel walls, towers, and machines bend,
+crack, and shatter under load and impact — on top of Box3D's proven soft-step
+rigid-body solver.
 
-Box3D is a 3D physics engine for games.
+## What makes it "Vox3D"
 
-[![Introducing Box3D](https://img.youtube.com/vi/jr_Fzl2XwKU/maxresdefault.jpg)](https://www.youtube.com/watch?v=jr_Fzl2XwKU)
+Standard Box3D treats geometry as convex hulls, capsules, spheres, meshes, and
+height fields. Vox3D adds a first-class notion of a **voxel lattice** — a body
+made of unit cells on a grid — and reasons about it two ways:
+
+- **Structurally** — a per-frame section-stress analysis over the lattice finds
+  where a structure is overloaded and severs the bonds that fail, so cracks
+  emerge from the actual load path instead of pre-authored seams.
+- **Physically** — voxel bodies collide, stack, and break into independent rigid
+  pieces, with the renderer instancing thousands of voxel cubes efficiently.
 
 ## Features
 
-### Collision
+### Voxel stress + fracture (the core of Vox3D)
 
-- Continuous collision detection
-- Contact events
-- Convex hulls, capsules, spheres, triangle meshes, and height fields
-- Multiple shapes per body
-- Collision filtering
-- Ray casts, shape casts, and overlap queries
-- Sensor system
-- Character mover
+Public API in [`include/box3d/fracture.h`](include/box3d/fracture.h), implemented
+in [`src/fracture.c`](src/fracture.c).
 
-### Physics
+- **Voxel bodies** built from a set of lattice cells (`b3World_CreateFractureVoxels`,
+  `b3World_CreateFractureBox`) with a configurable cell size.
+- **Six built-in materials** — concrete, brick, stone, wood, glass, metal — each
+  with density, strength, compressive factor, friction, and restitution.
+- **Emergent fracturing.** A quasi-static section-stress solver (with d'Alembert
+  inertial relief so tumbling bodies don't read as overloaded) drives
+  self-weight bending failure; a separate impact path knocks loose a crater and
+  severs boundary bonds on hard hits. Failed pieces split via connected-component
+  analysis into new independent bodies.
+- **Anchors** for fixing parts of a structure in place (`b3FractureAnchorFcn`).
+- **Greedy-meshed collision** — solid runs of voxels can merge into fewer, larger
+  box colliders (`def.merge`) to cut shape/broadphase/contact count.
+- **Stress heatmap** and material/fragment colouring (`b3World_ApplyFractureColors`),
+  and per-stage profiling (contact gather / analysis / sever / debris).
+- **Tunable** through `b3FractureTuning`: strength scale, impact thresholds,
+  minimum fragment size, debris caps, analysis stride, and parallel analysis
+  (the contact gather and stress analysis parallelize across pieces).
 
-- Robust _Soft Step_ rigid body solver
-- Continuous physics for fast translations and rotations
-- Island based sleep
-- Revolute, prismatic, distance, motor, weld, and wheel joints
-- Joint limits, motors, springs, and friction
-- Joint and contact forces
-- Body movement events and sleep notification
+### Voxel collision shape
 
-### System
-
-- Data-oriented design
-- Written in portable C17
-- Extensive multithreading and SIMD
-- Optimized for large piles of bodies
-- Cross platform determinism
-- Recording and replay
+`b3VoxelData` collision geometry (see
+[`include/box3d/voxel.h`](include/box3d/voxel.h)) ported from the fast
+KRUNCH_AVBD voxel collider: **one broadphase proxy per body** (not one per voxel)
+plus a dedicated SAT narrowphase over the solid lattice, so large voxel bodies
+collide cheaply and slot precisely into matching cavities. The data model and
+query layer are implemented and tested; the SAT narrowphase and shape wiring are
+the next phases.
 
 ### Samples
 
-- Uses sokol to run with D3D11 on Windows, Metal on macOS, and OpenGL 4.5 on Linux.
-- Graphical user interface with imgui.
-- Many samples to demonstrate features and performance.
+A voxel-only demo suite (~28 samples + a recording replay viewer), built with
+sokol (D3D11 / Metal / OpenGL 4.5) and Dear ImGui, in four categories:
 
-## Building all platforms
+- **Voxel** — Sandbox, Materials, Shapes, Solid vs Shell, Anchors, Castle
+- **Stress** — Cantilever, Tower, Bridge Span, Arch, Beam Snap, Overload, Jenga, Silo
+- **Impact** — Wall Smash, Bullet Holes, Demolition, Crate Smash, Crush, Dominoes, Colonnade, Cratering
+- **Benchmark** — Voxel Wall (Large), Voxel Rain, Collapse Storm, Stride Sweep, Parallel Analysis, Debris Storm
 
-- Install [CMake](https://cmake.org/)
-- Install [git](https://git-scm.com/)
-- Ensure these run from the command line
+Every demo exposes the fracture tuning live, a stress/material/fragment colour
+toggle, and a HUD profiler. Fire projectiles with **Space** or **Shift+Left-click**.
 
-## Building with CMake presets (recommended)
+### Inherited from Box3D
 
-This uses the presets in `CMakePresets.json`.
+- Robust *Soft Step* rigid-body solver, continuous collision, island-based sleep.
+- Convex hulls, capsules, spheres, meshes, height fields; multiple shapes per body.
+- Revolute, prismatic, distance, motor, weld, and wheel joints.
+- Ray casts, shape casts, overlap queries, sensors, a character mover.
+- Data-oriented C17 core, multithreading and SIMD, cross-platform determinism,
+  recording and replay.
+
+## Quick start (voxel API)
+
+```c
+#include "box3d/box3d.h"
+
+b3WorldDef wd = b3DefaultWorldDef();
+wd.gravity = ( b3Vec3 ){ 0.0f, -9.81f, 0.0f };
+b3WorldId world = b3CreateWorld( &wd );
+
+// Enable the voxel stress + fracture subsystem: 1-unit cells, ground plane at y = 0.
+b3World_EnableFracture( world, 1.0f, 0.0f );
+
+// Build a wall out of concrete voxels on the integer lattice.
+b3Vec3i cells[40 * 20];
+int count = 0;
+for ( int x = 0; x < 40; ++x )
+    for ( int y = 0; y < 20; ++y )
+        cells[count++] = ( b3Vec3i ){ x, y, 0 };
+
+b3FractureDef def = b3DefaultFractureDef();
+b3World_CreateFractureVoxels( world, cells, count, b3GetFractureMaterial( b3_fractureConcrete ), &def );
+
+for ( int i = 0; i < 300; ++i )
+    b3World_Step( world, 1.0f / 60.0f, 4 ); // the wall settles, stresses, and can fracture on impact
+```
+
+See [`docs/hello.md`](docs/hello.md) for the base Box3D hello-world.
+
+## Building
+
+Requires [CMake](https://cmake.org/) and a C17 compiler (plus C++20 for the
+samples). The base engine builds on Windows, Linux, and macOS.
+
+**CMake presets** (recommended):
 
 - Windows: `cmake --preset windows` then `cmake --build --preset windows-release`
 - Linux: `cmake --preset linux-release` then `cmake --build --preset linux-release`
 - macOS: `cmake --preset macos` then `cmake --build --preset macos-release`
 - Windows MinGW: `cmake --preset mingw-release` then `cmake --build --preset mingw-release`
 
-Run the samples app (must be in the Box3D directory).
+**Visual Studio 2026** (the primary dev setup):
 
-- Windows: `.\build\bin\Release\samples.exe`
-- Linux: `./build/bin/samples`
-- macOS: `./build/bin/Release/samples`
-
-## Building for Visual Studio
-
-- Install [Visual Studio](https://visualstudio.microsoft.com/)
-- Run `build_vs2026.bat`
-- Open and build `build/box3d.slnx`
-
-## Building for Linux
-
-- Run `build.sh` from a bash shell
-- Results are in the build sub-folder
-
-## Building for Xcode
-
-- mkdir build
-- cd build
-- cmake -G Xcode ..
-- Open `box3d.xcodeproj`
-- Select the samples scheme
-- Build and run the samples
-
-## Building for Web
-
-- [Emscripten SDK](https://emscripten.org/docs/getting_started/downloads.html)
-- `emcmake cmake -B build -DBOX3D_SAMPLES=OFF`
-- `cmake --build build`
-
-Box3D uses SSE2 with WebAssembly. Define `BOX3D_DISABLE_SIMD` to disable SSE2.
-
-## Building and installing
-
-- mkdir build
-- cd build
-- cmake ..
-- cmake --build . --config Release
-- cmake --install . (might need sudo)
-
-## Using Box3D in your project
-
-The core library has no dependencies beyond the C runtime (and `libm` on Unix). Linking it
-gives you the `box3d::box3d` target.
-
-I recommend to use FetchContent:
-
-```cmake
-include(FetchContent)
-FetchContent_Declare(box3d
-  GIT_REPOSITORY https://github.com/erincatto/box3d.git
-  GIT_TAG v0.1.0)
-FetchContent_MakeAvailable(box3d)
-
-target_link_libraries(my_app PRIVATE box3d::box3d)
+```bat
+cmake -S . -B build -G "Visual Studio 18 2026"
+cmake --build build --config Release --target samples -j
+build\bin\Release\samples.exe
 ```
 
-For a vendored copy or git submodule, point `add_subdirectory` at it:
+Run a demo headless (renders N frames then self-exits — used for smoke tests):
 
-```cmake
-add_subdirectory(extern/box3d)
-
-target_link_libraries(my_app PRIVATE box3d::box3d)
+```bat
+build\bin\Release\samples.exe --sample <index> --frames <N>
 ```
 
-To use a copy installed with `cmake --install`, find the package:
+Unit tests build via the `test` target (`build/bin/Release/test.exe`), and include
+the voxel/fracture suites.
 
-```cmake
-find_package(box3d 0.1 REQUIRED)
+SIMD (SSE2 / Neon) can be disabled with `BOX3D_DISABLE_SIMD`.
 
-target_link_libraries(my_app PRIVATE box3d::box3d)
-```
+## Credits and license
 
-See [`docs/hello.md`](docs/hello.md) for a minimal first program.
+Vox3D is a fork of **[Box3D](https://github.com/erincatto/box3d) by Erin Catto**.
+All of the core rigid-body solver, collision, joints, and tooling are
+Erin Catto's work; Vox3D adds the voxel stress/fracture engine and the
+voxel collision shape on top.
+The custom voxel collision shape is made by ThePlasticPotato (also known as tomato or handspoken)
+and comes from the closed source Krunch_AVBD physics engine powering the
+valkyrien skies minecraft mod.
 
-## Compatibility
+Vox3D and Box3D are released under the [MIT license](LICENSE). The voxel collider
+work is being ported from the KRUNCH_AVBD collider which is licensed as ARR but the voxel collider
+code in vox3D is licensed under MIT with permission from the original creator to relicense it under MIT.
 
-The Box3D library and samples build and run on Windows, Linux, and Mac.
+Please star and support upstream Box3D via
+[GitHub Sponsors](https://github.com/sponsors/erincatto).
 
-You will need a compiler that supports C17 to build the Box3D library.
-
-You will need a compiler that supports C++20 to build the samples.
-
-Box3D uses SSE2 and Neon SIMD math to improve performance. SIMD can be disabled by defining `BOX3D_DISABLE_SIMD`.
-
-## Documentation
-
-The user manual lives in [`docs/`](docs/) and is built with Doxygen. Enable the `BOX3D_DOCS` CMake option and build the `doc` target.
-
-## Community
-
-- [Discord](https://discord.gg/NKYgCBP)
-
-## Contributing
-
-Pull requests are currently disabled. Instead, please file an issue for bugs or feature requests. For support, please visit the Discord server.
-
-## Giving feedback
-
-Please file an issue or start a chat on discord. You can also use [GitHub Discussions](https://github.com/erincatto/box3d/discussions).
-
-## License
-
-Box3D is developed by Erin Catto and uses the [MIT license](https://en.wikipedia.org/wiki/MIT_License).
-
-## Sponsorship
-
-Support development of Box3D through [Github Sponsors](https://github.com/sponsors/erincatto).
-
-Please consider starring this repository and subscribing to my [YouTube channel](https://www.youtube.com/@erin_catto).
-
-## LLM Usage
-
-LLMs are used in the following areas:
-
-- unit tests
-- samples app
-- migrating code between Box2D and Box3D
-- build configuration
-- code reviews
-- benchmarking
-
-Elsewhere all code is developed and written by me. I take responsibility for every line of code in Box2D/3D.
+My development discord server where you can talk and ask questions about vox3D can be found here:
+https://discord.gg/SJTxJeJBvb

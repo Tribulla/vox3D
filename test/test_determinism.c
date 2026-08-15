@@ -17,12 +17,11 @@
 
 // Double precision accumulates body positions in double, so the settle/sleep step and the
 // state hash differ from the float build. Both modes are internally deterministic.
-// The float ragdoll constants include the island Direct joint solver.
 #if defined( BOX3D_DOUBLE_PRECISION )
 #define RAGDOLL_SLEEP_STEP 297
-#define RAGDOLL_HASH 0xF4036C3A
-#define WAVE_PILE_SLEEP_STEP 297
-#define WAVE_PILE_HASH 0x658C00CF
+#define RAGDOLL_HASH 0x27FF38C1
+#define WAVE_PILE_SLEEP_STEP 258
+#define WAVE_PILE_HASH 0xA3CDC61B
 #define QUERY_SPAWN_SLEEP_STEP 242
 #define QUERY_SPAWN_HASH 0x1737F5BC
 #define QUERY_SPAWN_HIT_COUNT 59
@@ -30,10 +29,10 @@
 #define MESH_DROP_SLEEP_STEP 251
 #define MESH_DROP_HASH 0x465381C5
 #else
-#define RAGDOLL_SLEEP_STEP 313
-#define RAGDOLL_HASH 0x96290A5E
-#define WAVE_PILE_SLEEP_STEP 273
-#define WAVE_PILE_HASH 0x0BA28F3A
+#define RAGDOLL_SLEEP_STEP 308
+#define RAGDOLL_HASH 0x1E5EDD79
+#define WAVE_PILE_SLEEP_STEP 239
+#define WAVE_PILE_HASH 0xA2F4D472
 #define QUERY_SPAWN_SLEEP_STEP 242
 #define QUERY_SPAWN_HASH 0xB9F993A5
 #define QUERY_SPAWN_HIT_COUNT 59

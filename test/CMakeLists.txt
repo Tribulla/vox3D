@@ -6,12 +6,13 @@ set(BOX3D_TEST_FILES
     test_bitset.c
 	test_body.c
 	test_body_query.c
+	test_ccd_voxel.c
 	test_collision.c
 	test_compound.c
 	test_container.c
     test_determinism.c
     test_distance.c
-    test_hash.c
+    test_fracture.c
     test_height_field.c
     test_hull.c
     test_id.c
@@ -26,6 +27,8 @@ set(BOX3D_TEST_FILES
     test_sat.c
     test_shape.c
     test_table.c
+    test_voxel.c
+    test_voxel_collide.c
     test_world.c
 )
 

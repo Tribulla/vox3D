@@ -62,6 +62,7 @@ typedef struct b3Shape
 		b3Mesh mesh;
 		const b3HeightFieldData* heightField;
 		const b3CompoundData* compound;
+		const b3VoxelData* voxel;
 	};
 
 } b3Shape;
@@ -86,6 +87,13 @@ b3AABB b3ComputeSweptSphereAABB( const b3Sphere* shape, b3Transform xf1, b3Trans
 b3AABB b3ComputeSweptCapsuleAABB( const b3Capsule* shape, b3Transform xf1, b3Transform xf2 );
 
 b3AABB b3ComputeShapeAABB( const b3Shape* shape, b3Transform transform );
+
+const b3VoxelData* b3GetShapeVoxelData( b3World* world, b3ShapeId shapeId );
+
+void b3Shape_RemoveVoxelCells( b3World* world, b3ShapeId shapeId, const b3Vec3i* cells, int count );
+
+void b3Shape_AddVoxelCells( b3World* world, b3ShapeId shapeId, const b3Vec3i* cells, const uint16_t* geomIndices,
+							int count );
 
 // Conservative world AABB for a shape inflated by extra margin. In double precision mode the
 // box is built in the body local frame, translated by the double origin, and rounded outward.
@@ -152,9 +160,4 @@ static inline bool b3ShouldQueryCollide( const b3Filter* shapeFilter, const b3Qu
 {
 	return ( shapeFilter->categoryBits & queryFilter->maskBits ) != 0 &&
 		   ( shapeFilter->maskBits & queryFilter->categoryBits ) != 0;
-}
-
-static inline bool b3IsConvex( b3ShapeType type )
-{
-	return type == b3_sphereShape || type == b3_capsuleShape || type == b3_hullShape;
 }

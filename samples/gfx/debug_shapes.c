@@ -6,7 +6,6 @@
 #include "gfx/qsort.h"
 
 #include <assert.h>
-#include <inttypes.h>
 #include <math.h>
 #include <stdint.h>
 #include <stdio.h>
@@ -294,7 +293,30 @@ static b3Vec3 TriangleNormal( b3Vec3 a, b3Vec3 b, b3Vec3 c )
 	return n;
 }
 
-static MeshHandle BuildHull( const b3HullData* hull )
+static uint32_t HullGeomKey( const b3HullData* hull )
+{
+	struct
+	{
+		b3AABB aabb;
+		b3Vec3 center;
+		float volume, surfaceArea;
+	} k = { hull->aabb, hull->center, hull->volume, hull->surfaceArea };
+	const uint8_t* p = (const uint8_t*)&k;
+	uint32_t h = 2166136261u; // FNV-1a
+	for ( size_t i = 0; i < sizeof( k ); ++i )
+	{
+		h ^= p[i];
+		h *= 16777619u;
+	}
+	h ^= h >> 16; // murmur3 fmix32 finalizer for good avalanche
+	h *= 0x85ebca6bu;
+	h ^= h >> 13;
+	h *= 0xc2b2ae35u;
+	h ^= h >> 16;
+	return h ? h : 1u;
+}
+
+static MeshHandle BuildHull( const b3HullData* hull, uint32_t key )
 {
 	const b3Vec3* points = b3GetHullPoints( hull );
 	const b3HullHalfEdge* edges = b3GetHullEdges( hull );
@@ -302,7 +324,7 @@ static MeshHandle BuildHull( const b3HullData* hull )
 	const b3Plane* planes = b3GetHullPlanes( hull );
 	if ( !points || !edges || !faces || !planes )
 	{
-		fprintf( stderr, "error: hull missing arrays (hash=0x%016" PRIx64 ")\n", hull->hash );
+		fprintf( stderr, "error: hull missing arrays (hash=0x%08x)\n", hull->hash );
 		return InvalidMeshHandle();
 	}
 
@@ -331,7 +353,7 @@ static MeshHandle BuildHull( const b3HullData* hull )
 			e = edges[e].next;
 			if ( loopLen > 256 )
 			{
-				fprintf( stderr, "error: hull face loop runaway (hash=0x%016" PRIx64 ")\n", hull->hash );
+				fprintf( stderr, "error: hull face loop runaway (hash=0x%08x)\n", hull->hash );
 				BufferFree( &buf );
 				return InvalidMeshHandle();
 			}
@@ -387,7 +409,7 @@ static MeshHandle BuildHull( const b3HullData* hull )
 		}
 	}
 
-	MeshHandle h = RegisterMesh( hull->hash, buf.vertices, buf.vertexCount, buf.indices, buf.indexCount, "geom_hull" );
+	MeshHandle h = RegisterMesh( key, buf.vertices, buf.vertexCount, buf.indices, buf.indexCount, "geom_hull" );
 
 	if ( IsMeshHandleValid( h ) )
 	{
@@ -427,7 +449,7 @@ static MeshHandle BuildMeshData( const b3MeshData* meshData )
 	const uint8_t* flags = b3GetMeshFlags( meshData );
 	if ( !verts || !tris || meshData->triangleCount <= 0 )
 	{
-		fprintf( stderr, "error: mesh missing arrays or empty (hash=0x%016" PRIx64 ")\n", meshData->hash );
+		fprintf( stderr, "error: mesh missing arrays or empty (hash=0x%08x)\n", meshData->hash );
 		return InvalidMeshHandle();
 	}
 
@@ -560,7 +582,7 @@ static MeshHandle BuildHeightField( const b3HeightFieldData* hf )
 {
 	if ( hf->columnCount < 2 || hf->rowCount < 2 )
 	{
-		fprintf( stderr, "error: heightfield degenerate (hash=0x%016" PRIx64 ")\n", hf->hash );
+		fprintf( stderr, "error: heightfield degenerate (hash=0x%08x)\n", hf->hash );
 		return InvalidMeshHandle();
 	}
 
@@ -792,24 +814,38 @@ static MeshHandle BuildHeightField( const b3HeightFieldData* hf )
 
 MeshHandle FindOrAddHull( const b3HullData* hull )
 {
-	if ( !hull || hull->hash == 0 )
+	if ( !hull || hull->hash == 0u )
 	{
 		return InvalidMeshHandle();
 	}
 
-	MeshHandle existing = FindMesh( hull->hash );
+	uint32_t key = HullGeomKey( hull );
+	MeshHandle existing = FindMesh( key );
 	if ( IsMeshHandleValid( existing ) )
 	{
 		AddMeshReference( existing );
 		return existing;
 	}
 
-	return BuildHull( hull );
+	return BuildHull( hull, key );
+}
+
+MeshHandle FindOrAddUnitBox( void )
+{
+	b3BoxHull cube = b3MakeCubeHull( 0.5f );
+	uint32_t key = HullGeomKey( &cube.base );
+	MeshHandle existing = FindMesh( key );
+	if ( IsMeshHandleValid( existing ) )
+	{
+		AddMeshReference( existing );
+		return existing;
+	}
+	return BuildHull( &cube.base, key );
 }
 
 MeshHandle FindOrAddMesh( const b3MeshData* meshData )
 {
-	if ( !meshData || meshData->hash == 0 )
+	if ( !meshData || meshData->hash == 0u )
 	{
 		return InvalidMeshHandle();
 	}
@@ -826,7 +862,7 @@ MeshHandle FindOrAddMesh( const b3MeshData* meshData )
 
 MeshHandle FindOrAddHeightField( const b3HeightFieldData* heightField )
 {
-	if ( !heightField || heightField->hash == 0 )
+	if ( !heightField || heightField->hash == 0u )
 	{
 		return InvalidMeshHandle();
 	}

@@ -57,12 +57,7 @@
 		#define B3_SIMD_WIDTH 4
 		//#pragma message("B3_SIMD_SSE2")
 	#elif defined( B3_CPU_ARM )
-	// ARMv7 Neon doesn't have divide or sqrt so cannot be used.
-	#if defined( __aarch64__ ) || defined( _M_ARM64 )
 		#define B3_SIMD_NEON
-	#else
-		#define B3_SIMD_NONE
-	#endif
 		#define B3_SIMD_WIDTH 4
 		//#pragma message("B3_SIMD_NEON")
 	#elif defined( B3_CPU_WASM )
@@ -137,8 +132,13 @@ void* b3AllocZeroed( size_t size );
 void b3Free( void* mem, size_t size );
 void* b3GrowAlloc( void* oldMem, int oldSize, int newSize );
 
-B3_PRINTF_FORMAT( 1, 2 )
 void b3Log( const char* format, ... );
+
+// Geometry content hashes reserve zero to mean unhashed
+static inline uint32_t b3NonZeroHash( uint32_t hash )
+{
+	return hash != 0 ? hash : 1;
+}
 
 typedef struct b3Mutex b3Mutex;
 b3Mutex* b3CreateMutex( void );
@@ -159,5 +159,3 @@ b3Thread* b3CreateThread( b3ThreadFunction* function, void* context, const char*
 void b3JoinThread( b3Thread* t );
 
 void b3StrCpy( char* dst, int size, const char* src );
-
-uint64_t b3Hash64NonZero( const uint8_t* bytes, int n );

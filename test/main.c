@@ -29,12 +29,13 @@ extern int AllocatorTest( void );
 extern int BitTest( void );
 extern int BodyTest( void );
 extern int BodyQueryTest( void );
+extern int CcdVoxelTest( void );
 extern int CollisionTest( void );
 extern int CompoundTest( void );
 extern int ContainerTest( void );
 extern int DeterminismTest( void );
 extern int DistanceTest( void );
-extern int HashTest( void );
+extern int FractureTest( void );
 extern int HeightFieldTest( void );
 extern int HullTest( void );
 extern int IdTest( void );
@@ -48,6 +49,9 @@ extern int RecordingTest( void );
 extern int SeparatingAxisTest( void );
 extern int ShapeTest( void );
 extern int TableTest( void );
+extern int VoxelTest( void );
+extern int VoxelCollideTest( void );
+extern int VoxelPerfTest( void );
 extern int WorldTest( void );
 
 // Filter-aware test runner: skips tests that don't match the filter
@@ -103,12 +107,13 @@ int main( int argc, char** argv )
 	MAYBE_RUN_TEST( BitTest );
 	MAYBE_RUN_TEST( BodyTest );
 	MAYBE_RUN_TEST( BodyQueryTest );
+	MAYBE_RUN_TEST( CcdVoxelTest );
 	MAYBE_RUN_TEST( CollisionTest );
 	MAYBE_RUN_TEST( CompoundTest );
 	MAYBE_RUN_TEST( ContainerTest );
 	MAYBE_RUN_TEST( DeterminismTest );
 	MAYBE_RUN_TEST( DistanceTest );
-	MAYBE_RUN_TEST( HashTest );
+	MAYBE_RUN_TEST( FractureTest );
 	MAYBE_RUN_TEST( HeightFieldTest );
 	MAYBE_RUN_TEST( HullTest );
 	MAYBE_RUN_TEST( IdTest );
@@ -122,6 +127,9 @@ int main( int argc, char** argv )
 	MAYBE_RUN_TEST( SeparatingAxisTest );
 	MAYBE_RUN_TEST( ShapeTest );
 	MAYBE_RUN_TEST( TableTest );
+	MAYBE_RUN_TEST( VoxelTest );
+	MAYBE_RUN_TEST( VoxelCollideTest );
+	MAYBE_RUN_TEST( VoxelPerfTest );
 	MAYBE_RUN_TEST( WorldTest );
 
 	printf( "======================================\n" );

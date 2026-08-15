@@ -23,8 +23,7 @@
 #define WIN32_LEAN_AND_MEAN 1
 #endif
 
-// Lower-case windows.h intentionally for cross compiling on mingw.
-#include <windows.h>
+#include <Windows.h>
 #include <limits.h>
 
 static double s_invFrequency = 0.0;

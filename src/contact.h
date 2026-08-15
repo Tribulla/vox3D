@@ -177,7 +177,10 @@ void b3CreateContact( b3World* world, b3Shape* shapeA, b3Shape* shapeB, int chil
 void b3DestroyContact( b3World* world, b3Contact* contact, bool wakeBodies );
 
 bool b3UpdateContact( b3World* world, int workerIndex, b3Contact* contact, b3Shape* shapeA, b3Vec3 localCenterA, b3WorldTransform xfA,
-					  b3Shape* shapeB, b3Vec3 localCenterB, b3WorldTransform xfB, bool isFast, b3Arena arena );
+					  b3Shape* shapeB, b3Vec3 localCenterB, b3WorldTransform xfB, bool isFast, float relMotion, b3Arena arena );
 
 bool b3ComputeMeshManifolds( b3World* world, int workerIndex, b3Contact* contact, const b3Shape* shapeA, const int* materialMap,
 							 b3WorldTransform xfA, const b3Shape* shapeB, b3WorldTransform xfB, bool isFast, b3Arena arena );
+
+bool b3ComputeVoxelManifolds( b3World* world, int workerIndex, b3Contact* contact, const b3Shape* shapeA, b3WorldTransform xfA,
+							  const b3Shape* shapeB, b3WorldTransform xfB, float relMotion, b3Arena arena );

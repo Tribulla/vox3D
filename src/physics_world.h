@@ -178,7 +178,7 @@ typedef struct b3World
 	b3Array( b3Shape ) shapes;
 
 	// Reference counted store of shared hull data keyed by content. Shapes hold a
-	// pointer to the hull stored in the db. Type erased to avoid leaking the verstable map
+	// pointer to the owned copy here. Opaque to avoid leaking the verstable map
 	// type into this header.
 	void* hullDatabase;
 
@@ -265,6 +265,8 @@ typedef struct b3World
 	// Non-NULL while a recording session is active. Set by b3World_StartRecording,
 	// cleared by b3World_StopRecording. Hooks in mutators check this before writing.
 	struct b3Recording* recording;
+
+	void* fractureWorld;
 
 	// latest inverse sub-step
 	float inv_h;

@@ -119,9 +119,7 @@ public:
 	// Update and render are split to support pausing the simulation
 	virtual void Step();
 
-	virtual void Render()
-	{
-	}
+	virtual void Render() {}
 
 	// Draw sample controls into the shared info panel. Return true if any widget
 	// was drawn so the panel can add a separator.
@@ -182,8 +180,6 @@ public:
 	virtual void MouseMove( b3Vec2 p );
 
 	void ToggleThirdPerson();
-
-	B3_PRINTF_FORMAT( 2, 3 )
 	void DrawTextLine( const char* text, ... );
 	void ResetProfile();
 
@@ -225,18 +221,6 @@ public:
 	int m_currentProfileIndex;
 	int m_profileReadIndex;
 	int m_profileWriteIndex;
-
-	// View-space distance range the shadow cascades split over, set during
-	// construction. Left at zero the range is guessed from the world bounds,
-	// which only works when the camera sits close to the content. A scene
-	// viewed from far off wants an explicit range: the guess spends every
-	// cascade on the empty space in front of the camera and the shadows stop
-	// partway into the scene.
-	//
-	// Authored against the sample's opening camera, so flying well away from
-	// it can still outrun the far end.
-	float m_shadowSplitNear;
-	float m_shadowSplitFar;
 
 	b3Vec2 m_mouseLast;
 	b3Vec2 m_mouseDelta;

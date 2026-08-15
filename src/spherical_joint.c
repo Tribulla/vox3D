@@ -433,8 +433,6 @@ void b3SolveSphericalJoint( b3JointSim* base, b3StepContext* context, bool useBi
 {
 	float mA = base->invMassA;
 	float mB = base->invMassB;
-	B3_UNUSED( mA );
-	B3_UNUSED( mB );
 	b3Matrix3 iA = base->invIA;
 	b3Matrix3 iB = base->invIB;
 
@@ -603,7 +601,49 @@ void b3SolveSphericalJoint( b3JointSim* base, b3StepContext* context, bool useBi
 		wB = b3MulSub( wB, deltaImpulse, b3MulMV( iB, swingAxis ) );
 	}
 
-	// Point-to-point is solved by b3SolveJoints_Direct.
+	// Solve point-to-point constraint
+	{
+		b3Vec3 rA = b3RotateVector( stateA->deltaRotation, joint->frameA.p );
+		b3Vec3 rB = b3RotateVector( stateB->deltaRotation, joint->frameB.p );
+
+		b3Vec3 cdot = b3Sub( b3Sub( b3Add( vB, b3Cross( wB, rB ) ), vA ), b3Cross( wA, rA ) );
+
+		b3Vec3 bias = b3Vec3_zero;
+		float massScale = 1.0f;
+		float impulseScale = 0.0f;
+		if ( useBias )
+		{
+			b3Vec3 dcA = stateA->deltaPosition;
+			b3Vec3 dcB = stateB->deltaPosition;
+
+			b3Vec3 separation = b3Add( b3Sub( dcB, dcA ), b3Sub( rB, rA ) );
+			separation = b3Add( separation, joint->deltaCenter );
+
+			bias = b3MulSV( base->constraintSoftness.biasRate, separation );
+			massScale = base->constraintSoftness.massScale;
+			impulseScale = base->constraintSoftness.impulseScale;
+		}
+
+		//// K = [(1/m1 + 1/m2) * eye(2) - skew(r1) * invI1 * skew(r1) - skew(r2) * invI2 * skew(r2)]
+		b3Matrix3 sA = b3Skew( rA );
+		b3Matrix3 sB = b3Skew( rB );
+		b3Matrix3 kA = b3MulMM( sA, b3MulMM( base->invIA, sA ) );
+		b3Matrix3 kB = b3MulMM( sB, b3MulMM( base->invIB, sB ) );
+		b3Matrix3 k = b3NegateMat3( b3AddMM( kA, kB ) );
+		k.cx.x += mA + mB;
+		k.cy.y += mA + mB;
+		k.cz.z += mA + mB;
+
+		b3Vec3 b = b3Solve3( k, b3Add( cdot, bias ) );
+
+		b3Vec3 impulse = b3MulSub( b3MulSV( -massScale, b ), impulseScale, joint->linearImpulse );
+		joint->linearImpulse = b3Add( joint->linearImpulse, impulse );
+
+		vA = b3MulSub( vA, mA, impulse );
+		wA = b3Sub( wA, b3MulMV( iA, b3Cross( rA, impulse ) ) );
+		vB = b3MulAdd( vB, mB, impulse );
+		wB = b3Add( wB, b3MulMV( iB, b3Cross( rB, impulse ) ) );
+	}
 
 	if ( stateA->flags & b3_dynamicFlag )
 	{

@@ -1,4 +1,4 @@
-// SPDX-FileCopyrightText: 2026 Erin Catto
+// SPDX-FileCopyrightText: 2025 Erin Catto
 // SPDX-License-Identifier: MIT
 
 #include "algorithm.h"
@@ -82,8 +82,8 @@ static int b3ClipSegmentToHullFace( b3ClipVertex segment[2], const b3HullData* h
 	return 2;
 }
 
-static b3SeparatingAxis b3QueryFaceDirectionHullAndCapsule( const b3HullData* hull, const b3Capsule* capsule,
-															b3Transform capsuleTransform )
+static b3FaceQuery b3QueryFaceDirectionHullAndCapsule( const b3HullData* hull, const b3Capsule* capsule,
+													   b3Transform capsuleTransform )
 {
 	int maxFaceIndex = -1;
 	int maxVertexIndex = -1;
@@ -110,16 +110,15 @@ static b3SeparatingAxis b3QueryFaceDirectionHullAndCapsule( const b3HullData* hu
 		}
 	}
 
-	return (b3SeparatingAxis){
-		.normal = planes[maxFaceIndex].normal,
+	return (b3FaceQuery){
 		.separation = maxFaceSeparation,
-		.indexA = (uint8_t)maxFaceIndex,
-		.indexB = (uint8_t)maxVertexIndex,
+		.faceIndex = (uint8_t)maxFaceIndex,
+		.vertexIndex = (uint8_t)maxVertexIndex,
 	};
 }
 
-static b3SeparatingAxis b3QueryEdgeDirectionHullAndCapsule( const b3HullData* hull, const b3Capsule* capsule,
-															b3Transform capsuleTransform )
+static b3EdgeQuery b3QueryEdgeDirectionHullAndCapsule( const b3HullData* hull, const b3Capsule* capsule,
+													   b3Transform capsuleTransform )
 {
 	// Find axis of minimum penetration
 	b3Vec3 maxNormal = b3Vec3_zero;
@@ -195,7 +194,7 @@ static b3SeparatingAxis b3QueryEdgeDirectionHullAndCapsule( const b3HullData* hu
 	}
 
 	// Save result
-	return (b3SeparatingAxis){
+	return (b3EdgeQuery){
 		.normal = maxNormal,
 		.separation = maxSeparation,
 		.indexA = maxIndexA,
@@ -705,13 +704,13 @@ void b3CollideCapsules( b3LocalManifold* manifold, int capacity, const b3Capsule
 }
 
 static bool b3BuildHullFaceAndCapsuleContact( b3LocalManifold* manifold, const b3HullData* hullA, const b3Capsule* capsuleB,
-											  b3Transform transformBtoA, b3SeparatingAxis query )
+											  b3Transform transformBtoA, b3FaceQuery query )
 {
 	// Work in shapeA coordinates
 	const b3Plane* planes = b3GetHullPlanes( hullA );
 
 	// Clip the capsule edge against the side planes of the reference face
-	int refFace = query.indexA;
+	int refFace = query.faceIndex;
 	b3Plane refPlane = planes[refFace];
 
 	b3ClipVertex segmentB[2];
@@ -758,8 +757,21 @@ static bool b3BuildHullFaceAndCapsuleContact( b3LocalManifold* manifold, const b
 	return false;
 }
 
+static inline float b3DeepestPointSeparation( const b3LocalManifold* manifold )
+{
+	// Deepest point
+	float minSeparation = FLT_MAX;
+	int pointCount = manifold->pointCount;
+	for ( int i = 0; i < pointCount; ++i )
+	{
+		minSeparation = b3MinFloat( minSeparation, manifold->points[i].separation );
+	}
+
+	return minSeparation;
+}
+
 static bool b3BuildHullAndCapsuleEdgeContact( b3LocalManifold* manifold, int capacity, const b3HullData* hullA,
-											  const b3Capsule* capsuleB, b3Transform transformBtoA, b3SeparatingAxis query )
+											  const b3Capsule* capsuleB, b3Transform transformBtoA, b3EdgeQuery query )
 {
 	if ( capacity < 1 )
 	{
@@ -904,14 +916,14 @@ void b3CollideHullAndCapsule( b3LocalManifold* manifold, int capacity, const b3H
 
 	// Deep penetration
 
-	b3SeparatingAxis faceQuery = b3QueryFaceDirectionHullAndCapsule( hullA, capsuleB, transformBtoA );
+	b3FaceQuery faceQuery = b3QueryFaceDirectionHullAndCapsule( hullA, capsuleB, transformBtoA );
 	if ( faceQuery.separation > capsuleB->radius )
 	{
 		// We found a separating axis
 		return;
 	}
 
-	b3SeparatingAxis edgeQuery = b3QueryEdgeDirectionHullAndCapsule( hullA, capsuleB, transformBtoA );
+	b3EdgeQuery edgeQuery = b3QueryEdgeDirectionHullAndCapsule( hullA, capsuleB, transformBtoA );
 	if ( edgeQuery.separation > capsuleB->radius )
 	{
 		// We found a separating axis
@@ -921,12 +933,14 @@ void b3CollideHullAndCapsule( b3LocalManifold* manifold, int capacity, const b3H
 	// Create face contact
 	float faceSeparation = faceQuery.separation - capsuleB->radius;
 	b3BuildHullFaceAndCapsuleContact( manifold, hullA, capsuleB, transformBtoA, faceQuery );
-	B3_VALIDATE( manifold->pointCount == 0 || manifold->pointCount == 2 );
-	if ( manifold->pointCount == 2 )
+	if ( manifold->pointCount > 1 )
 	{
-		// This becomes the clipped separation.
-		faceSeparation = b3MinFloat( manifold->points[0].separation, manifold->points[1].separation );
+		// If ( Out.PointCount <= 1 ) -> Compare with unclipped separation
+		// If ( Out.PointCount > 1 ) -> Be aggressive and compare with clipped separation
+		// Face contact can be empty if it does not realize the axis of minimum penetration
+		faceSeparation = b3DeepestPointSeparation( manifold );
 	}
+	B3_VALIDATE( faceSeparation <= 0.0f );
 
 	// Is there a valid edge-edge axis?
 	if ( edgeQuery.indexA == B3_NULL_INDEX )
@@ -936,9 +950,10 @@ void b3CollideHullAndCapsule( b3LocalManifold* manifold, int capacity, const b3H
 
 	// Face contact can be empty if it does not realize the axis of minimum penetration.
 	// Create edge contact if face contact fails or edge contact is significantly better!
-	float linearSlop = B3_LINEAR_SLOP;
+	const float kRelEdgeTolerance = 0.90f;
+	const float kAbsTolerance = 0.5f * B3_LINEAR_SLOP;
 	float edgeSeparation = edgeQuery.separation - capsuleB->radius;
-	if ( manifold->pointCount == 0 || edgeSeparation > faceSeparation + linearSlop )
+	if ( manifold->pointCount == 0 || edgeSeparation > kRelEdgeTolerance * faceSeparation + kAbsTolerance )
 	{
 		// Edge contact
 		b3BuildHullAndCapsuleEdgeContact( manifold, capacity, hullA, capsuleB, transformBtoA, edgeQuery );
@@ -984,24 +999,20 @@ static int b3BuildPolygon( b3ClipVertex* out, b3Transform transform, const b3Hul
 }
 
 static bool b3BuildFaceAContact( b3LocalManifold* manifold, int capacity, const b3HullData* hullA, const b3HullData* hullB,
-								 b3Transform transformBtoA, b3SeparatingAxis query, b3SATCache* cache )
+								 b3Transform transformBtoA, b3FaceQuery query, b3SATCache* cache )
 {
-	B3_VALIDATE( query.type == b3_faceAxisA );
-	B3_VALIDATE( 0 <= query.indexA && query.indexA < hullA->faceCount );
-	B3_VALIDATE( 0 <= query.indexB && query.indexB < hullB->vertexCount );
-
 	const b3HullFace* facesA = b3GetHullFaces( hullA );
 	const b3HullHalfEdge* edgesA = b3GetHullEdges( hullA );
 	const b3Plane* planesA = b3GetHullPlanes( hullA );
 	const b3Vec3* pointsA = b3GetHullPoints( hullA );
 
 	// Reference face
-	int refFace = query.indexA;
+	int refFace = query.faceIndex;
 	b3Plane refPlane = planesA[refFace];
 
 	// Find incident face
 	b3Vec3 refNormalInB = b3InvRotateVector( transformBtoA.q, refPlane.normal );
-	int incFace = b3FindIncidentFace( hullB, refNormalInB, query.indexB );
+	int incFace = b3FindIncidentFace( hullB, refNormalInB, query.vertexIndex );
 
 	// Build clip polygon from incident face in frame A
 	b3ClipVertex buffer1[B3_MAX_CLIP_POINTS], buffer2[B3_MAX_CLIP_POINTS];
@@ -1078,30 +1089,19 @@ static bool b3BuildFaceAContact( b3LocalManifold* manifold, int capacity, const 
 	// Save cache
 	cache->separation = minSeparation;
 	cache->type = (uint8_t)b3_faceAxisA;
-	cache->indexA = (uint8_t)query.indexA;
-	cache->indexB = (uint8_t)query.indexB;
+	cache->indexA = (uint8_t)query.faceIndex;
+	cache->indexB = (uint8_t)query.vertexIndex;
 
 	return true;
 }
 
 static bool b3BuildFaceBContact( b3LocalManifold* manifold, int capacity, const b3HullData* hullA, const b3HullData* hullB,
-								 b3Transform transformBtoA, b3SeparatingAxis query, b3SATCache* cache )
+								 b3Transform transformBtoA, b3FaceQuery query, b3SATCache* cache )
 {
-	B3_VALIDATE( query.type == b3_faceAxisB );
-
 	b3Transform transformAtoB = b3InvertTransform( transformBtoA );
-	b3SeparatingAxis flippedQuery = {
-		.normal = b3Neg( query.normal ),
-		.separation = query.separation,
-		.indexA = query.indexB,
-		.indexB = query.indexA,
-		.type = b3_faceAxisA,
-	};
-
-	bool touching = b3BuildFaceAContact( manifold, capacity, hullB, hullA, transformAtoB, flippedQuery, cache );
+	bool touching = b3BuildFaceAContact( manifold, capacity, hullB, hullA, transformAtoB, query, cache );
 	if ( touching == false )
 	{
-		*cache = (b3SATCache){ 0 };
 		return false;
 	}
 
@@ -1110,6 +1110,9 @@ static bool b3BuildFaceBContact( b3LocalManifold* manifold, int capacity, const 
 
 	// Transform and flip normal so it points from A to B, even though the B has the reference face.
 	manifold->normal = b3Neg( b3MulMV( matrix, manifold->normal ) );
+	cache->type = (uint8_t)b3_faceAxisB;
+	cache->indexA = (uint8_t)query.vertexIndex;
+	cache->indexB = (uint8_t)query.faceIndex;
 
 	// Transform points from frame B to frame A.
 	// Also flip the pairs to ensure correct matches.
@@ -1120,20 +1123,12 @@ static bool b3BuildFaceBContact( b3LocalManifold* manifold, int capacity, const 
 		pt->pair = b3FlipPair( pt->pair );
 	}
 
-	cache->type = (uint8_t)b3_faceAxisB;
-	cache->indexA = (uint8_t)query.indexA;
-	cache->indexB = (uint8_t)query.indexB;
-
 	return true;
 }
 
 static bool b3BuildEdgeContact( b3LocalManifold* manifold, const b3HullData* hullA, const b3HullData* hullB,
-								b3Transform transformBtoA, b3SeparatingAxis query, b3SATCache* cache )
+								b3Transform transformBtoA, b3EdgeQuery query, b3SATCache* cache )
 {
-	B3_VALIDATE( query.type == b3_edgePairAxis );
-	B3_VALIDATE( 0 <= query.indexA && query.indexA < hullA->edgeCount );
-	B3_VALIDATE( 0 <= query.indexB && query.indexB < hullB->edgeCount );
-
 	// Work in shapeA coordinates
 	const b3HullHalfEdge* edgesA = b3GetHullEdges( hullA );
 	const b3Vec3* pointsA = b3GetHullPoints( hullA );
@@ -1300,39 +1295,22 @@ static inline void b3GetSupportWide( b3Vec3 normal, const float* vx, const float
 
 // SIMD separating axis test based on an implementation developed by Cairn Overturf.
 // See his article: https://cairno.substack.com/p/improvements-to-the-separating-axis
-b3AxisQuery b3ComputeSeparatingAxis( const b3HullData* hullA, const b3HullData* hullB, b3Transform xfB, bool earlyReturn )
+b3AxisQuery b3ComputeSeparatingAxis( const b3HullData* hullA, const b3HullData* hullB, b3Transform xfB, int axisOverride )
 {
+	B3_VALIDATE( axisOverride == b3_invalidAxis || axisOverride == b3_manualFaceAxisA || axisOverride == b3_manualFaceAxisB ||
+				 axisOverride == b3_manualEdgePairAxis );
+
 	b3Matrix3 R = b3MakeMatrixFromQuat( xfB.q );
 	b3Matrix3 invR = b3Transpose( R );
 
 	float speculativeDistance = B3_SPECULATIVE_DISTANCE;
 
 	b3AxisQuery res = {
-		.faceA =
-			{
-				.normal = b3Vec3_zero,
-				.separation = -INFINITY,
-				.indexA = B3_NULL_INDEX,
-				.indexB = B3_NULL_INDEX,
-				.type = b3_faceAxisA,
-			},
-		.faceB =
-			{
-				.normal = b3Vec3_zero,
-				.separation = -INFINITY,
-				.indexA = B3_NULL_INDEX,
-				.indexB = B3_NULL_INDEX,
-				.type = b3_faceAxisB,
-			},
-		.edge =
-			{
-				.normal = b3Vec3_zero,
-				.separation = -INFINITY,
-				.indexA = B3_NULL_INDEX,
-				.indexB = B3_NULL_INDEX,
-				.type = b3_edgePairAxis,
-			},
-		.separatedFeature = b3_invalidAxis,
+		.normal = b3Vec3_zero,
+		.separation = -INFINITY,
+		.indexA = B3_NULL_INDEX,
+		.indexB = B3_NULL_INDEX,
+		.type = b3_invalidAxis,
 	};
 
 	int faceCountA = hullA->faceCount;
@@ -1347,28 +1325,36 @@ b3AxisQuery b3ComputeSeparatingAxis( const b3HullData* hullA, const b3HullData* 
 	b3Vec3 hB = b3AABB_Extents( hullB->aabb );
 
 	// Test A's face planes against B's vertices.
-	for ( int i = 0; i < faceCountA; ++i )
+	if ( axisOverride != b3_manualFaceAxisB && axisOverride != b3_manualEdgePairAxis )
 	{
-		b3Plane plane = planesA[i];
-		b3Vec3 direction = b3Neg( b3MulMV( invR, plane.normal ) );
-		float planeSeparation = b3Dot( plane.normal, xfB.p ) - plane.offset;
-		float biasB = b3Dot( direction, cB ) + 1.0625f * b3Dot( b3Abs( direction ), hB );
-		float support;
-		int vertexIndex;
-		b3GetSupportWide( direction, vxB, vyB, vzB, soaVertexCountB, biasB, &support, &vertexIndex );
-		float separation = planeSeparation - support;
-		if ( separation > res.faceA.separation )
+		for ( int i = 0; i < faceCountA; ++i )
 		{
-			res.faceA.normal = plane.normal;
-			res.faceA.separation = separation;
-			res.faceA.indexA = i;
-			res.faceA.indexB = vertexIndex;
-			if ( separation > speculativeDistance && earlyReturn )
+			b3Plane plane = planesA[i];
+			b3Vec3 direction = b3Neg( b3MulMV( invR, plane.normal ) );
+			float planeSeparation = b3Dot( plane.normal, xfB.p ) - plane.offset;
+			float biasB = b3Dot( direction, cB ) + 1.0625f * b3Dot( b3Abs( direction ), hB );
+			float support;
+			int vertexIndex;
+			b3GetSupportWide( direction, vxB, vyB, vzB, soaVertexCountB, biasB, &support, &vertexIndex );
+			float separation = planeSeparation - support;
+			if ( separation > res.separation )
 			{
-				res.separatedFeature = b3_faceAxisA;
-				return res;
+				res.type = b3_faceAxisA;
+				res.separation = separation;
+				res.indexA = i;
+				res.indexB = vertexIndex;
+				res.normal = plane.normal;
+				if ( separation > speculativeDistance )
+				{
+					return res;
+				}
 			}
 		}
+	}
+
+	if ( axisOverride == b3_manualFaceAxisA )
+	{
+		return res;
 	}
 
 	int faceCountB = hullB->faceCount;
@@ -1383,29 +1369,37 @@ b3AxisQuery b3ComputeSeparatingAxis( const b3HullData* hullA, const b3HullData* 
 	b3Vec3 hA = b3AABB_Extents( hullA->aabb );
 
 	// Test B's face planes against A's vertices.
-	for ( int i = 0; i < faceCountB; ++i )
+	if ( axisOverride != b3_manualEdgePairAxis )
 	{
-		b3Plane plane = planesB[i];
-		b3Vec3 direction = b3Neg( b3MulMV( R, plane.normal ) );
-		float planeSeparation = b3Dot( direction, xfB.p ) - plane.offset;
-		float biasA = b3Dot( direction, cA ) + 1.0625f * b3Dot( b3Abs( direction ), hA );
-		float support;
-		int vertexIndex;
-		b3GetSupportWide( direction, vxA, vyA, vzA, soaVertexCountA, biasA, &support, &vertexIndex );
-		float separation = planeSeparation - support;
-		if ( separation > res.faceB.separation )
+		for ( int i = 0; i < faceCountB; ++i )
 		{
-			res.faceB.normal = direction;
-			res.faceB.separation = separation;
-			res.faceB.indexA = vertexIndex;
-			res.faceB.indexB = i;
-			// This points from A to B and is in frame A
-			if ( separation > speculativeDistance && earlyReturn )
+			b3Plane plane = planesB[i];
+			b3Vec3 direction = b3Neg( b3MulMV( R, plane.normal ) );
+			float planeSeparation = b3Dot( direction, xfB.p ) - plane.offset;
+			float biasA = b3Dot( direction, cA ) + 1.0625f * b3Dot( b3Abs( direction ), hA );
+			float support;
+			int vertexIndex;
+			b3GetSupportWide( direction, vxA, vyA, vzA, soaVertexCountA, biasA, &support, &vertexIndex );
+			float separation = planeSeparation - support;
+			if ( separation > res.separation )
 			{
-				res.separatedFeature = b3_faceAxisB;
-				return res;
+				res.type = b3_faceAxisB;
+				res.separation = separation;
+				res.indexA = vertexIndex;
+				res.indexB = i;
+				// This points from A to B and is in frame A
+				res.normal = direction;
+				if ( separation > speculativeDistance )
+				{
+					return res;
+				}
 			}
 		}
+	}
+
+	if ( axisOverride == b3_manualFaceAxisB )
+	{
+		return res;
 	}
 
 	// Transform B into A's space once, into SoA arrays. Extra space so
@@ -1542,6 +1536,9 @@ b3AxisQuery b3ComputeSeparatingAxis( const b3HullData* hullA, const b3HullData* 
 	b3StoreW( aV0z + na, zero );
 	b3StoreW( aTol + na, zero );
 
+	// Prefer face contact for more contact points.
+	float absFaceBias = 0.1f * B3_LINEAR_SLOP;
+
 	int edgeCountB = halfEdgeCountB / 2;
 
 #if defined( B3_SIMD_NONE )
@@ -1611,18 +1608,20 @@ b3AxisQuery b3ComputeSeparatingAxis( const b3HullData* hullA, const b3HullData* 
 			float sz = aV0z[i] + bv0z;
 
 			float separation = -( sx * nx + ( sy * ny + sz * nz ) );
-			if ( separation > res.edge.separation )
+			if ( separation > res.separation + absFaceBias )
 			{
-				res.edge.normal = (b3Vec3){ nx, ny, nz };
-				res.edge.separation = separation;
+				res.normal = (b3Vec3){ nx, ny, nz };
+				res.separation = separation;
+				res.type = b3_edgePairAxis;
 
 				// Half edge index
-				res.edge.indexA = 2 * i;
-				res.edge.indexB = 2 * j;
-
-				if ( separation > speculativeDistance && earlyReturn )
+				res.indexA = 2 * i;
+				res.indexB = 2 * j;
+				
+				// Edge beats face, remove bias
+				absFaceBias = 0.0f;
+				if ( separation > speculativeDistance )
 				{
-					res.separatedFeature = b3_edgePairAxis;
 					return res;
 				}
 			}
@@ -1630,7 +1629,7 @@ b3AxisQuery b3ComputeSeparatingAxis( const b3HullData* hullA, const b3HullData* 
 	}
 
 #else
-
+	
 	// Edge phase, one B edge against four A edges at a time, no transforms in the loop.
 	const b3FloatW EPS = b3SplatW( -0.0001f );
 	const b3FloatW INF = b3SplatW( INFINITY );
@@ -1719,7 +1718,7 @@ b3AxisQuery b3ComputeSeparatingAxis( const b3HullData* hullA, const b3HullData* 
 			// Test all 4 supports against the running best at once. If none beats it, skip the
 			// store and scalar reduction. res->support only turns negative just before returning,
 			// so this never skips a lane that would trigger the early out.
-			b3FloatW improves = b3GreaterThanW( separation, b3SplatW( res.edge.separation ) );
+			b3FloatW improves = b3GreaterThanW( separation, b3SplatW( res.separation ) );
 			if ( b3AnyTrueW( improves ) == false )
 			{
 				continue;
@@ -1741,18 +1740,20 @@ b3AxisQuery b3ComputeSeparatingAxis( const b3HullData* hullA, const b3HullData* 
 			{
 				int ei = i + lane;
 				float s = sA[lane];
-				if ( s > res.edge.separation )
+				if ( s > res.separation + absFaceBias )
 				{
-					res.edge.normal = (b3Vec3){ nxA[lane], nyA[lane], nzA[lane] };
-					res.edge.separation = s;
-
+					res.normal = (b3Vec3){ nxA[lane], nyA[lane], nzA[lane] };
+					res.separation = s;
+					res.type = b3_edgePairAxis;
 					// Half edge index
-					res.edge.indexA = 2 * ei;
-					res.edge.indexB = 2 * j;
+					res.indexA = 2 * ei;
+					res.indexB = 2 * j;
 
-					if ( s > speculativeDistance && earlyReturn )
+					// Edge beats face, remove bias
+					absFaceBias = 0.0f;
+
+					if ( s > speculativeDistance )
 					{
-						res.separatedFeature = b3_edgePairAxis;
 						return res;
 					}
 				}
@@ -1823,12 +1824,10 @@ void b3CollideHulls( b3LocalManifold* manifold, int capacity, const b3HullData* 
 			}
 
 			// Attempt face contact using cached feature
-			b3SeparatingAxis faceQuery;
-			faceQuery.normal = plane.normal;
+			b3FaceQuery faceQuery;
 			faceQuery.separation = 0.0f;
-			faceQuery.indexA = cache->indexA;
-			faceQuery.indexB = vertexIndex;
-			faceQuery.type = b3_faceAxisA;
+			faceQuery.faceIndex = cache->indexA;
+			faceQuery.vertexIndex = vertexIndex;
 
 			b3SATCache localCache = { 0 };
 			bool touching = b3BuildFaceAContact( manifold, capacity, hullA, hullB, transformBtoA, faceQuery, &localCache );
@@ -1862,12 +1861,10 @@ void b3CollideHulls( b3LocalManifold* manifold, int capacity, const b3HullData* 
 			}
 
 			// Attempt face contact using cached feature
-			b3SeparatingAxis faceQuery;
-			faceQuery.normal = b3Neg( plane.normal );
+			b3FaceQuery faceQuery;
 			faceQuery.separation = 0.0f;
-			faceQuery.indexA = vertexIndex;
-			faceQuery.indexB = cache->indexB;
-			faceQuery.type = b3_faceAxisB;
+			faceQuery.faceIndex = cache->indexB;
+			faceQuery.vertexIndex = vertexIndex;
 
 			b3SATCache localCache = { 0 };
 			bool touching = b3BuildFaceBContact( manifold, capacity, hullA, hullB, transformBtoA, faceQuery, &localCache );
@@ -1936,12 +1933,11 @@ void b3CollideHulls( b3LocalManifold* manifold, int capacity, const b3HullData* 
 					}
 
 					// Try to rebuild contact from last features
-					b3SeparatingAxis edgeQuery = { 0 };
+					b3EdgeQuery edgeQuery = { 0 };
 					edgeQuery.normal = b3Neg( axis );
 					edgeQuery.separation = 0.0f;
 					edgeQuery.indexA = cache->indexA;
 					edgeQuery.indexB = cache->indexB;
-					edgeQuery.type = b3_edgePairAxis;
 
 					b3SATCache localCache = { 0 };
 					bool touching = b3BuildEdgeContact( manifold, hullA, hullB, transformBtoA, edgeQuery, &localCache );
@@ -1961,8 +1957,13 @@ void b3CollideHulls( b3LocalManifold* manifold, int capacity, const b3HullData* 
 			// This case is for testing
 		case b3_manualFaceAxisA:
 		{
-			b3AxisQuery axisQuery = b3ComputeSeparatingAxis( hullA, hullB, transformBtoA, false );
-			b3SeparatingAxis faceQuery = axisQuery.faceA;
+			b3AxisQuery axisQuery = b3ComputeSeparatingAxis( hullA, hullB, transformBtoA, b3_manualFaceAxisA );
+			b3FaceQuery faceQuery = {
+				.separation = axisQuery.separation,
+				.faceIndex = axisQuery.indexA,
+				.vertexIndex = axisQuery.indexB,
+			};
+
 			b3BuildFaceAContact( manifold, capacity, hullA, hullB, transformBtoA, faceQuery, cache );
 			return;
 		}
@@ -1970,8 +1971,12 @@ void b3CollideHulls( b3LocalManifold* manifold, int capacity, const b3HullData* 
 			// This case is for testing
 		case b3_manualFaceAxisB:
 		{
-			b3AxisQuery axisQuery = b3ComputeSeparatingAxis( hullA, hullB, transformBtoA, false );
-			b3SeparatingAxis faceQuery = axisQuery.faceB;
+			b3AxisQuery axisQuery = b3ComputeSeparatingAxis( hullA, hullB, transformBtoA, b3_manualFaceAxisB );
+			b3FaceQuery faceQuery = {
+				.separation = axisQuery.separation,
+				.faceIndex = axisQuery.indexB,
+				.vertexIndex = axisQuery.indexA,
+			};
 			b3BuildFaceBContact( manifold, capacity, hullA, hullB, transformBtoA, faceQuery, cache );
 			return;
 		}
@@ -1979,8 +1984,14 @@ void b3CollideHulls( b3LocalManifold* manifold, int capacity, const b3HullData* 
 			// This case is for testing
 		case b3_manualEdgePairAxis:
 		{
-			b3AxisQuery axisQuery = b3ComputeSeparatingAxis( hullA, hullB, transformBtoA, false );
-			b3SeparatingAxis edgeQuery = axisQuery.edge;
+			b3AxisQuery axisQuery = b3ComputeSeparatingAxis( hullA, hullB, transformBtoA, b3_manualEdgePairAxis );
+			b3EdgeQuery edgeQuery = {
+				.normal = axisQuery.normal,
+				.indexA = axisQuery.indexA,
+				.indexB = axisQuery.indexB,
+				.separation = axisQuery.separation,
+			};
+
 			if ( edgeQuery.indexA != B3_NULL_INDEX )
 			{
 				b3BuildEdgeContact( manifold, hullA, hullB, transformBtoA, edgeQuery, cache );
@@ -1996,94 +2007,74 @@ void b3CollideHulls( b3LocalManifold* manifold, int capacity, const b3HullData* 
 	manifold->pointCount = 0;
 	*cache = (b3SATCache){ 0 };
 
-	b3AxisQuery axisQuery = b3ComputeSeparatingAxis( hullA, hullB, transformBtoA, true );
+	b3AxisQuery axisQuery = b3ComputeSeparatingAxis( hullA, hullB, transformBtoA, b3_invalidAxis );
 
-	if ( axisQuery.separatedFeature != b3_invalidAxis )
+	B3_VALIDATE( 0 <= axisQuery.indexA && axisQuery.indexA <= UINT8_MAX );
+	B3_VALIDATE( 0 <= axisQuery.indexB && axisQuery.indexB <= UINT8_MAX );
+	B3_ASSERT( axisQuery.type != b3_invalidAxis );
+
+	cache->separation = axisQuery.separation;
+	cache->type = (uint8_t)axisQuery.type;
+	cache->indexA = (uint8_t)axisQuery.indexA;
+	cache->indexB = (uint8_t)axisQuery.indexB;
+
+	if ( axisQuery.separation > speculativeDistance )
 	{
 		// We found a separating axis
-		cache->type = axisQuery.separatedFeature;
-
-		if ( axisQuery.separatedFeature == b3_faceAxisA )
-		{
-			B3_VALIDATE( axisQuery.faceA.separation > speculativeDistance );
-			cache->separation = axisQuery.faceA.separation;
-			cache->indexA = (uint8_t)axisQuery.faceA.indexA;
-			cache->indexB = (uint8_t)axisQuery.faceA.indexB;
-		}
-		else if ( axisQuery.separatedFeature == b3_faceAxisB )
-		{
-			B3_VALIDATE( axisQuery.faceB.separation > speculativeDistance );
-			cache->separation = axisQuery.faceB.separation;
-			cache->indexA = (uint8_t)axisQuery.faceB.indexA;
-			cache->indexB = (uint8_t)axisQuery.faceB.indexB;
-		}
-		else
-		{
-			B3_ASSERT( axisQuery.separatedFeature == b3_edgePairAxis );
-			B3_VALIDATE( axisQuery.edge.separation > speculativeDistance );
-			cache->separation = axisQuery.edge.separation;
-			cache->indexA = (uint8_t)axisQuery.edge.indexA;
-			cache->indexB = (uint8_t)axisQuery.edge.indexB;
-		}
 		return;
 	}
 
-	B3_VALIDATE( axisQuery.faceA.separation <= speculativeDistance || axisQuery.faceB.separation <= speculativeDistance ||
-				 axisQuery.edge.separation <= speculativeDistance );
-
-	if ( axisQuery.faceA.separation > axisQuery.faceB.separation )
+	if ( axisQuery.type == b3_faceAxisA )
 	{
-		b3SeparatingAxis faceQuery = axisQuery.faceA;
-		B3_VALIDATE( 0 <= faceQuery.indexA && faceQuery.indexA < hullA->faceCount );
-		B3_VALIDATE( 0 <= faceQuery.indexB && faceQuery.indexB < hullB->vertexCount );
+		B3_ASSERT( axisQuery.indexA < hullA->faceCount );
+		B3_ASSERT( axisQuery.indexB < hullB->vertexCount );
+
+		b3FaceQuery faceQuery = {
+			.separation = axisQuery.separation,
+			.faceIndex = axisQuery.indexA,
+			.vertexIndex = axisQuery.indexB,
+		};
 
 		// Face contact A
 		b3BuildFaceAContact( manifold, capacity, hullA, hullB, transformBtoA, faceQuery, cache );
 
-		B3_VALIDATE( cache->indexA < hullA->faceCount );
-		B3_VALIDATE( cache->indexB < hullB->vertexCount );
+		return;
 	}
-	else
+
+	if ( axisQuery.type == b3_faceAxisB )
 	{
-		b3SeparatingAxis faceQuery = axisQuery.faceB;
-		B3_VALIDATE( 0 <= faceQuery.indexA && faceQuery.indexA < hullA->vertexCount );
-		B3_VALIDATE( 0 <= faceQuery.indexB && faceQuery.indexB < hullB->faceCount );
+		B3_ASSERT( axisQuery.indexA < hullA->vertexCount );
+		B3_ASSERT( axisQuery.indexB < hullB->faceCount );
+
+		b3FaceQuery faceQuery = {
+			.separation = axisQuery.separation,
+			.faceIndex = axisQuery.indexB,
+			.vertexIndex = axisQuery.indexA,
+		};
 
 		// Face contact B
 		b3BuildFaceBContact( manifold, capacity, hullA, hullB, transformBtoA, faceQuery, cache );
 
-		B3_VALIDATE( cache->indexA < hullA->vertexCount );
-		B3_VALIDATE( cache->indexB < hullB->faceCount );
-	}
-
-	b3SeparatingAxis edgeQuery = axisQuery.edge;
-
-	if ( edgeQuery.indexA == B3_NULL_INDEX )
-	{
-		// There are no valid edge pairs (all edges parallel)
 		return;
 	}
 
-	float clipSeparation = cache->separation;
-	float edgeTol = linearSlop;
+	B3_ASSERT( axisQuery.type == b3_edgePairAxis );
 
-	// Face contact can be empty if it does not realize the axis of minimum penetration.
-	// Create edge contact if face contact fails or edge contact is significantly better!
-	if ( manifold->pointCount == 0 || edgeQuery.separation > clipSeparation + edgeTol )
 	{
-		B3_ASSERT( 0 <= edgeQuery.indexA && edgeQuery.indexA < hullA->edgeCount );
-		B3_ASSERT( 0 <= edgeQuery.indexB && edgeQuery.indexB < hullB->edgeCount );
-
 		// Edge contact
 		b3LocalManifold edgeManifold = { 0 };
 		b3LocalManifoldPoint edgePoint = { 0 };
 		edgeManifold.points = &edgePoint;
 
-		b3SATCache edgeCache = { 0 };
-		b3BuildEdgeContact( &edgeManifold, hullA, hullB, transformBtoA, edgeQuery, &edgeCache );
+		b3EdgeQuery edgeQuery = {
+			.normal = axisQuery.normal,
+			.indexA = axisQuery.indexA,
+			.indexB = axisQuery.indexB,
+			.separation = axisQuery.separation,
+		};
 
-		// It is possible with speculation to have vertex-vertex collision that is missed by SAT,
-		// so edge contact yields no points. In that case perhaps the face contact has some points.
+		b3BuildEdgeContact( &edgeManifold, hullA, hullB, transformBtoA, edgeQuery, cache );
+
 		if ( edgeManifold.pointCount == 1 )
 		{
 			// Copy edge manifold out, being careful to preserve manifold point buffer.
@@ -2091,29 +2082,11 @@ void b3CollideHulls( b3LocalManifold* manifold, int capacity, const b3HullData* 
 			*manifold = edgeManifold;
 			manifold->points = points;
 			manifold->points[0] = edgePoint;
-			*cache = edgeCache;
 		}
 	}
 }
 
 #else
-
-// todo this code has gone stale, will be deleted soon
-
-typedef struct b3FaceQuery
-{
-	float separation;
-	int faceIndex;
-	int vertexIndex;
-} b3FaceQuery;
-
-typedef struct b3EdgeQuery
-{
-	b3Vec3 normal;
-	float separation;
-	int indexA;
-	int indexB;
-} b3EdgeQuery;
 
 // Old non-SIMD version. Keeping this for testing and comparisons
 

@@ -31,17 +31,16 @@ set(BOX3D_SOURCE_FILES
 	distance.c
 	distance_joint.c
 	dynamic_tree.c
+	fracture.c
+	fracture.h
 	height_field.c
 	hull.c
-	hull.h
 	id_pool.c
 	id_pool.h
 	island.c
 	island.h
 	joint.c
 	joint.h
-	joint_solver.c
-	joint_solver.h
 	manifold.c
 	manifold.h
 	math_functions.c
@@ -60,7 +59,6 @@ set(BOX3D_SOURCE_FILES
 	platform.h
 	prismatic_joint.c
 	qsort.h
-	rapidhash.h
 	recording.c
 	recording.h
 	recording_ops.inl
@@ -89,6 +87,11 @@ set(BOX3D_SOURCE_FILES
 	triangle_manifold.c
 	types.c
 	verstable.h
+	voxel_collide.c
+	voxel_collide.h
+	voxel_manifold.c
+	voxel_shape.c
+	voxel_shape.h
 	weld_joint.c
 	wheel_joint.c
 
@@ -101,9 +104,11 @@ set(BOX3D_INCLUDE_FILES
 	../include/box3d/collision.h
 	../include/box3d/config.h
 	../include/box3d/constants.h
+	../include/box3d/fracture.h
 	../include/box3d/id.h
 	../include/box3d/math_functions.h
 	../include/box3d/types.h
+	../include/box3d/voxel.h
 )
 
 # Hide internal functions
@@ -158,8 +163,7 @@ if (BOX3D_PROFILE)
 endif()
 
 if(BOX3D_VALIDATE)
-	# Only effective when NDEBUG is undefined, see base.h
-	message(STATUS "Box3D validation ON (debug builds)")
+	message(STATUS "Box3D validation ON")	
 	target_compile_definitions(box3d PRIVATE BOX3D_VALIDATE)
 endif()
 

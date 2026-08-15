@@ -9,9 +9,91 @@
 #include "box3d/collision.h"
 #include "box3d/constants.h"
 #include "box3d/math_functions.h"
+#include "core.h"
+#include "platform.h"
 
 #include <stdio.h>
 #include <string.h>
+
+typedef struct ConcurrentWorldCreateContext
+{
+	b3AtomicInt* readyCount;
+	b3AtomicInt* start;
+	b3WorldId worldId;
+} ConcurrentWorldCreateContext;
+
+static void ConcurrentWorldCreateTask( void* context )
+{
+	ConcurrentWorldCreateContext* createContext = context;
+	b3AtomicFetchAddInt( createContext->readyCount, 1 );
+	while ( b3AtomicLoadInt( createContext->start ) == 0 )
+	{
+		b3Yield();
+	}
+
+	b3WorldDef worldDef = b3DefaultWorldDef();
+	createContext->worldId = b3CreateWorld( &worldDef );
+}
+
+static int ConcurrentWorldCreation( void )
+{
+	enum
+	{
+		threadCount = 16,
+		roundCount = 32,
+	};
+
+	for ( int round = 0; round < roundCount; ++round )
+	{
+		b3AtomicInt readyCount = { 0 };
+		b3AtomicInt start = { 0 };
+		ConcurrentWorldCreateContext contexts[threadCount] = { 0 };
+		b3Thread* threads[threadCount] = { 0 };
+
+		for ( int i = 0; i < threadCount; ++i )
+		{
+			contexts[i].readyCount = &readyCount;
+			contexts[i].start = &start;
+			threads[i] = b3CreateThread( ConcurrentWorldCreateTask, contexts + i, "world_create" );
+		}
+
+		while ( b3AtomicLoadInt( &readyCount ) != threadCount )
+		{
+			b3Yield();
+		}
+		b3AtomicStoreInt( &start, 1 );
+
+		for ( int i = 0; i < threadCount; ++i )
+		{
+			b3JoinThread( threads[i] );
+		}
+
+		for ( int i = 0; i < threadCount; ++i )
+		{
+			ENSURE( b3World_IsValid( contexts[i].worldId ) );
+			for ( int j = 0; j < i; ++j )
+			{
+				ENSURE( contexts[i].worldId.index1 != contexts[j].worldId.index1 );
+			}
+
+			b3BodyDef bodyDef = b3DefaultBodyDef();
+			bodyDef.type = b3_dynamicBody;
+			b3BodyId bodyId = b3CreateBody( contexts[i].worldId, &bodyDef );
+			b3BoxHull box = b3MakeCubeHull( 0.5f );
+			b3ShapeDef shapeDef = b3DefaultShapeDef();
+			b3CreateHullShape( bodyId, &shapeDef, &box.base );
+			b3World_Step( contexts[i].worldId, 1.0f / 60.0f, 4 );
+		}
+
+		for ( int i = 0; i < threadCount; ++i )
+		{
+			b3DestroyWorld( contexts[i].worldId );
+		}
+	}
+
+	ENSURE( b3GetWorldCount() == 0 );
+	return 0;
+}
 
 // This is a simple example of building and running a simulation
 // using Box3D. Here we create a large ground box and a small dynamic
@@ -1160,6 +1242,7 @@ static int TestContinuousMoveEvent( void )
 
 int WorldTest( void )
 {
+	RUN_SUBTEST( ConcurrentWorldCreation );
 	RUN_SUBTEST( HelloWorld );
 	RUN_SUBTEST( EmptyWorld );
 	RUN_SUBTEST( DestroyAllBodiesWorld );

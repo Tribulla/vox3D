@@ -3,7 +3,6 @@
 
 #pragma once
 
-#include "container.h"
 #include "core.h"
 
 #include "box3d/id.h"
@@ -51,10 +50,10 @@ typedef struct b3World b3World;
 #define B3_REC_VERSION_MAJOR 4
 
 // Minor tracks op-stream additions that keep the 48 byte header shape.
-// Minor version 4 added b3Shape_SetMeshMaterial, b3Shape_SetHull, b3Shape_SetMesh
-#define B3_REC_VERSION_MINOR 4
+// Minor version 3 added name cache.
+#define B3_REC_VERSION_MINOR 3
 
-// File header, fixed 48 bytes. Contains the registry locator so the player
+// File header, fixed 48 bytes, little-endian. Contains the registry locator so the player
 // can load geometry before replaying any ops.
 typedef struct b3RecHeader
 {
@@ -107,13 +106,13 @@ typedef struct b3GeometryEntry
 	int hashNext;
 } b3GeometryEntry;
 
-b3DeclareArray( b3GeometryEntry );
-
 // Growable array of geometry entries. Ids are array indices, so the array is serialized in order.
 // dedupMap maps content hash to entry id for O(1) dedup; it is opaque here and owned by recording.c.
 typedef struct b3GeometryRegistry
 {
-	b3Array( b3GeometryEntry ) entries;
+	b3GeometryEntry* entries;
+	int count;
+	int capacity;
 	void* dedupMap;
 } b3GeometryRegistry;
 
@@ -127,7 +126,7 @@ typedef struct b3GeometryRegistry
 typedef struct b3RecTag
 {
 	// hash of (id, queryName)
-	uint64_t key;
+	uint64_t key;				  
 	uint64_t id;
 	char queryName[B3_MAX_QUERY_NAME_LENGTH + 1];
 } b3RecTag;
@@ -372,6 +371,8 @@ uint32_t b3RecInternHull( b3Recording* rec, const b3HullData* hull );
 uint32_t b3RecInternMesh( b3Recording* rec, const b3MeshData* mesh );
 uint32_t b3RecInternHeightField( b3Recording* rec, const b3HeightFieldData* hf );
 uint32_t b3RecInternCompound( b3Recording* rec, const b3CompoundData* compound );
+
+uint64_t b3Hash64Blob( const uint8_t* bytes, int n );
 
 // Lifecycle engine-side hooks
 void b3StartRecordingIntoBuffer( b3World* world, b3Recording* recording );

@@ -3,7 +3,6 @@
 
 #include "body.h"
 #include "joint.h"
-#include "math_internal.h"
 #include "physics_world.h"
 #include "solver.h"
 #include "solver_set.h"
@@ -192,19 +191,6 @@ void b3WarmStartWeldJoint( b3JointSim* base, b3StepContext* context )
 	}
 }
 
-static b3Matrix3 b3WeldLinearMass( float mA, float mB, b3Matrix3 invIA, b3Matrix3 invIB, b3Vec3 rA, b3Vec3 rB )
-{
-	b3Matrix3 sA = b3Skew( rA );
-	b3Matrix3 sB = b3Skew( rB );
-	b3Matrix3 kA = b3MulMM( sA, b3MulMM( invIA, sA ) );
-	b3Matrix3 kB = b3MulMM( sB, b3MulMM( invIB, sB ) );
-	b3Matrix3 k = b3NegateMat3( b3AddMM( kA, kB ) );
-	k.cx.x += mA + mB;
-	k.cy.y += mA + mB;
-	k.cz.z += mA + mB;
-	return k;
-}
-
 void b3SolveWeldJoint( b3JointSim* base, b3StepContext* context, bool useBias )
 {
 	float mA = base->invMassA;
@@ -236,10 +222,8 @@ void b3SolveWeldJoint( b3JointSim* base, b3StepContext* context, bool useBias )
 
 	b3Quat relQ = b3InvMulQuat( quatA, quatB );
 
-	b3Vec3 rA = b3RotateVector( stateA->deltaRotation, joint->frameA.p );
-	b3Vec3 rB = b3RotateVector( stateB->deltaRotation, joint->frameB.p );
-
-	if ( fixedRotation == false && joint->angularHertz > 0.0f )
+	// angular constraint
+	if ( fixedRotation == false )
 	{
 		b3Vec3 bias = b3Vec3_zero;
 		float massScale = 1.0f;
@@ -256,16 +240,18 @@ void b3SolveWeldJoint( b3JointSim* base, b3StepContext* context, bool useBias )
 		}
 
 		b3Vec3 cdot = b3Sub( wB, wA );
-		b3Vec3 impulse = b3MulSub( b3MulSV( -massScale, b3MulMV( joint->angularMass, b3Add( cdot, bias ) ) ), impulseScale,
-								   joint->angularImpulse );
+		b3Vec3 impulse = b3MulSub( b3MulSV( -massScale, b3MulMV( joint->angularMass, b3Add( cdot, bias ) ) ), impulseScale, joint->angularImpulse );
 		joint->angularImpulse = b3Add( joint->angularImpulse, impulse );
 
 		wA = b3Sub( wA, b3MulMV( iA, impulse ) );
 		wB = b3Add( wB, b3MulMV( iB, impulse ) );
 	}
 
-	if ( joint->linearHertz > 0.0f )
+	// linear constraint
 	{
+		b3Vec3 rA = b3RotateVector( stateA->deltaRotation, joint->frameA.p );
+		b3Vec3 rB = b3RotateVector( stateB->deltaRotation, joint->frameB.p );
+
 		b3Vec3 cdot = b3Sub( b3Add( vB, b3Cross( wB, rB ) ), b3Add( vA, b3Cross( wA, rA ) ) );
 
 		b3Vec3 bias = b3Vec3_zero;
@@ -283,7 +269,16 @@ void b3SolveWeldJoint( b3JointSim* base, b3StepContext* context, bool useBias )
 			impulseScale = joint->linearSpring.impulseScale;
 		}
 
-		b3Matrix3 k = b3WeldLinearMass( mA, mB, iA, iB, rA, rB );
+		//// K = [(1/m1 + 1/m2) * eye(2) - skew(r1) * invI1 * skew(r1) - skew(r2) * invI2 * skew(r2)]
+		b3Matrix3 sA = b3Skew( rA );
+		b3Matrix3 sB = b3Skew( rB );
+		b3Matrix3 kA = b3MulMM( sA, b3MulMM( base->invIA, sA ) );
+		b3Matrix3 kB = b3MulMM( sB, b3MulMM( base->invIB, sB ) );
+		b3Matrix3 k = b3NegateMat3( b3AddMM( kA, kB ) );
+		k.cx.x += mA + mB;
+		k.cy.y += mA + mB;
+		k.cz.z += mA + mB;
+
 		b3Vec3 b = b3Solve3( k, b3Add( cdot, bias ) );
 
 		b3Vec3 impulse = b3MulSub( b3MulSV( -massScale, b ), impulseScale, joint->linearImpulse );

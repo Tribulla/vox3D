@@ -1,10 +1,6 @@
 // SPDX-FileCopyrightText: 2026 Erin Catto
 // SPDX-License-Identifier: MIT
 
-#if defined( _MSC_VER ) && !defined( _CRT_SECURE_NO_WARNINGS )
-#define _CRT_SECURE_NO_WARNINGS
-#endif
-
 #include "gfx/text.h"
 
 #include <assert.h>

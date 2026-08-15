@@ -3,9 +3,8 @@
 
 // Dirk Gregorius contributed portions of this code
 
-#include "hull.h"
-
 #include "algorithm.h"
+#include "hull_map.h"
 #include "math_internal.h"
 #include "shape.h"
 
@@ -27,8 +26,8 @@
 #define B3_MARK_VISIBLE 0
 #define B3_MARK_DELETE 1
 
-// Final hull is index-encoded with uint8_t, so vertex/edge/face counts are capped at 256.
-#define B3_HULL_MAX_COUNT ( UINT8_MAX + 1 )
+// Final hull is index-encoded with uint8_t, so vertex/edge/face counts are capped at UINT8_MAX.
+#define B3_HULL_LIMIT UINT8_MAX
 
 typedef struct b3QHListNode
 {
@@ -121,16 +120,12 @@ typedef struct b3HullBuilder
 	b3QHHalfEdge* edgeBase;
 	int edgeCapacity;
 	int edgeCount;
-
-	// LIFO free list. Built with edge->next.
-	b3QHHalfEdge* edgeFreeHead;
+	b3QHHalfEdge* edgeFreeHead; // LIFO free list; overlays edge->next
 
 	b3QHFace* faceBase;
 	int faceCapacity;
 	int faceCount;
-
-	// LIFO free list. Built with face->link.next.
-	b3QHFace* faceFreeHead;
+	b3QHFace* faceFreeHead; // LIFO free list; overlays face->link.next
 
 	// Reusable scratch buffers.
 	b3QHHalfEdge** horizon;
@@ -150,6 +145,7 @@ typedef struct b3HullBuilder
 	int horizonStackCapacity;
 
 	// Final counts of the constructed hull (vertexList / faceList / half-edges around faces).
+	// Populated by CleanHull; zero until then.
 	int finalVertexCount;
 	int finalHalfEdgeCount;
 	int finalFaceCount;
@@ -304,18 +300,17 @@ static b3QHFace* b3HullBuilder_NewFace( b3HullBuilder* b, b3QHVertex* v1, b3QHVe
 	return face;
 }
 
-// Remove face and add to free list.
+// Remove face from faceList if still linked, clear its edge pointer, then push onto faceFreeHead.
+// Uses face->link.next as the free-list next pointer (link.prev stays NULL, so b3QHList_Contains
+// returns false on a free slot, as required by the retire-guard in ResolveFaces).
 static void b3HullBuilder_RetireFace( b3HullBuilder* b, b3QHFace* face )
 {
-	// Sometimes a cone face gets merged and never added to the list.
 	if ( b3QHList_Contains( &face->link ) )
 	{
 		b3QHList_Remove( &face->link );
 	}
-
 	face->edge = NULL;
-	// link.prev is already NULL after Remove (or was never set).
-	B3_VALIDATE( face->link.prev == NULL );
+	// link.prev is already NULL after Remove (or was never set). link.next holds free-list ptr.
 	face->link.next = (b3QHListNode*)b->faceFreeHead;
 	b->faceFreeHead = face;
 }
@@ -1237,7 +1232,7 @@ static void b3HullBuilder_ResolveVertices( b3HullBuilder* b )
 static void b3HullBuilder_ResolveFaces( b3HullBuilder* b )
 {
 	// Splice deleted faces out of the face list. Faces already retired by AbsorbFaces are no
-	// longer on faceList, so guard with b3QHList_Contains before removing.
+	// longer on faceList, so we guard with b3QHList_Contains before removing.
 	b3QHListNode* node = b->faceList.link.next;
 	while ( node != &b->faceList.link )
 	{
@@ -1247,21 +1242,7 @@ static void b3HullBuilder_ResolveFaces( b3HullBuilder* b )
 		if ( face->mark == B3_MARK_DELETE && b3QHList_Contains( &face->link ) )
 		{
 			B3_ASSERT( B3_LIST_EMPTY( &face->conflictListHead.link ) );
-
-			// Each half-edge is owned by exactly one face, so ring walks over the
-			// dead region retire every interior edge exactly once. Merge deleted
-			// faces are already off the face list.
-			b3QHHalfEdge* start = face->edge;
-			b3QHHalfEdge* edge = start;
-			do
-			{
-				b3QHHalfEdge* next = edge->next;
-				b3HullBuilder_RetireEdge( b, edge );
-				edge = next;
-			}
-			while ( edge != start );
-
-			b3HullBuilder_RetireFace( b, face );
+			b3QHList_Remove( &face->link );
 		}
 	}
 
@@ -1446,7 +1427,7 @@ static bool b3HullBuilder_Construct( b3HullBuilder* b, const b3Vec3* points, int
 		return false;
 	}
 
-	int budget = b3ClampInt( maxVertexCount - 4, 0, B3_HULL_MAX_COUNT - 4 );
+	int budget = b3ClampInt( maxVertexCount - 4, 0, B3_HULL_LIMIT - 4 );
 
 	b3QHVertex* vertex = b3HullBuilder_NextConflictVertex( b );
 	while ( vertex && budget > 0 )
@@ -1467,10 +1448,8 @@ static bool b3HullBuilder_Construct( b3HullBuilder* b, const b3Vec3* points, int
 
 typedef struct b3HullWorkSizes
 {
-	// Input point count
-	int N;
-	// Output point limit
-	int M;
+	int N; // pointCount
+	int M; // clamped maxVertexCount, in [4, B3_HULL_LIMIT]
 	int vertexCapacity;
 	int edgeCapacity;
 	int faceCapacity;
@@ -1500,19 +1479,39 @@ static b3HullWorkSizes b3ComputeHullWorkSizes( int pointCount, int clampedMaxCou
 	s.vertexCapacity = pointCount + 4;
 
 	// Edges and faces use free-list recycling; capacity is proportional to live hull size.
-	// edgeCapacity: peak is ~twice live edges plus cone edges. Minimum 48.
-	s.edgeCapacity = b3MaxInt( 48, 24 * s.M - 48 );
+	// edgeCapacity: peak is ~twice live edges plus cone edges; floor 48.
+	s.edgeCapacity = 24 * s.M - 48;
+	if ( s.edgeCapacity < 48 )
+	{
+		s.edgeCapacity = 48;
+	}
 
-	// faceCapacity: peak intermediate state live faces (<=2*M-4) plus full cone (<=3*M-6). Minimum 16.
-	s.faceCapacity = b3MaxInt( 16, 5 * s.M - 10 );
+	// faceCapacity: peak intermediate state live faces (<=2*M-4) plus full cone (<=3*M-6); floor 16.
+	s.faceCapacity = 5 * s.M - 10;
+	if ( s.faceCapacity < 16 )
+	{
+		s.faceCapacity = 16;
+	}
 
-	// Horizon/cone bounded by current half-edge count. Merged faces by face count.
-	s.horizonCapacity = b3MaxInt( 6, 3 * s.M - 6 );
+	// Horizon/cone bounded by current half-edge count; mergedFaces by face count.
+	s.horizonCapacity = 3 * s.M - 6;
+	if ( s.horizonCapacity < 6 )
+	{
+		s.horizonCapacity = 6;
+	}
 	s.coneCapacity = s.horizonCapacity;
-	s.mergedFacesCapacity = b3MaxInt( 4, 2 * s.M - 4 );
+	s.mergedFacesCapacity = 2 * s.M - 4;
+	if ( s.mergedFacesCapacity < 4 )
+	{
+		s.mergedFacesCapacity = 4;
+	}
 
 	// Horizon DFS depth is bounded by the number of live faces (Euler: <=2*M-4).
-	s.horizonStackCapacity = b3MaxInt( 4, 2 * s.M - 4 );
+	s.horizonStackCapacity = 2 * s.M - 4;
+	if ( s.horizonStackCapacity < 4 )
+	{
+		s.horizonStackCapacity = 4;
+	}
 
 	size_t offset = 0;
 
@@ -2066,14 +2065,14 @@ b3HullData* b3CreateHull( const b3Vec3* points, int pointCount, int maxVertexCou
 		return NULL;
 	}
 
-	if ( builder.finalVertexCount > B3_MAX_HULL_VERTICES )
+	if ( builder.finalVertexCount >= B3_MAX_HULL_VERTICES )
 	{
 		b3Log( "hull final vertex count of %d exceeds limit of %d", builder.finalVertexCount, B3_MAX_HULL_VERTICES );
 		b3Free( work, sizes.totalBytes );
 		return NULL;
 	}
 
-	if ( builder.finalFaceCount > B3_MAX_HULL_FACES )
+	if ( builder.finalFaceCount >= B3_MAX_HULL_FACES )
 	{
 		b3Log( "hull final face count of %d exceeds limit of %d", builder.finalFaceCount, B3_MAX_HULL_FACES );
 		b3Free( work, sizes.totalBytes );
@@ -2081,20 +2080,20 @@ b3HullData* b3CreateHull( const b3Vec3* points, int pointCount, int maxVertexCou
 	}
 
 	int maxHalfEdgeCount = 2 * B3_MAX_HULL_EDGES;
-	if ( builder.finalHalfEdgeCount > maxHalfEdgeCount )
+	if ( builder.finalHalfEdgeCount >= maxHalfEdgeCount )
 	{
 		b3Log( "hull final half edge count of %d exceeds limit of %d", builder.finalHalfEdgeCount, maxHalfEdgeCount );
 		b3Free( work, sizes.totalBytes );
 		return NULL;
 	}
 
-	// Walk lists into temp arrays bounded by B3_HULL_MAX_COUNT, stamping finalIndex on each node so
+	// Walk lists into temp arrays bounded by B3_HULL_LIMIT, stamping finalIndex on each node so
 	// the resolution pass below is O(E + F) instead of O(E^2 + F^2).
-	const b3QHVertex* tempVertices[B3_HULL_MAX_COUNT];
+	const b3QHVertex* tempVertices[B3_HULL_LIMIT];
 	int vertexCount = 0;
 	for ( b3QHListNode* node = builder.vertexList.link.next; node != &builder.vertexList.link; node = node->next )
 	{
-		B3_ASSERT( vertexCount < B3_HULL_MAX_COUNT );
+		B3_ASSERT( vertexCount <= B3_HULL_LIMIT - 1 );
 
 		b3QHVertex* vertex = (b3QHVertex*)node;
 		vertex->finalIndex = vertexCount;
@@ -2102,14 +2101,15 @@ b3HullData* b3CreateHull( const b3Vec3* points, int pointCount, int maxVertexCou
 	}
 
 	// Collect edges in twin-paired order (i, i+1) by stamping each pair as we discover it.
-	const b3QHFace* tempFaces[B3_HULL_MAX_COUNT];
-	const b3QHHalfEdge* tempEdges[B3_HULL_MAX_COUNT];
+	// Replaces b3SortEdges' O(E^2) twin pairing.
+	const b3QHFace* tempFaces[B3_HULL_LIMIT];
+	const b3QHHalfEdge* tempEdges[B3_HULL_LIMIT];
 	int faceCount = 0;
 	int edgeCount = 0;
 
 	for ( b3QHListNode* faceNode = builder.faceList.link.next; faceNode != &builder.faceList.link; faceNode = faceNode->next )
 	{
-		B3_ASSERT( faceCount < B3_HULL_MAX_COUNT );
+		B3_ASSERT( faceCount <= B3_HULL_LIMIT - 1 );
 
 		b3QHFace* face = (b3QHFace*)faceNode;
 		face->finalIndex = faceCount;
@@ -2120,7 +2120,7 @@ b3HullData* b3CreateHull( const b3Vec3* points, int pointCount, int maxVertexCou
 		{
 			if ( edge->finalIndex < 0 )
 			{
-				B3_ASSERT( edgeCount + 1 < B3_HULL_MAX_COUNT );
+				B3_ASSERT( edgeCount + 1 <= B3_HULL_LIMIT - 1 );
 
 				edge->finalIndex = edgeCount;
 				tempEdges[edgeCount++] = edge;
@@ -2259,7 +2259,7 @@ b3HullData* b3CreateHull( const b3Vec3* points, int pointCount, int maxVertexCou
 	}
 
 	hull->hash = 0;
-	hull->hash = b3Hash64NonZero( (uint8_t*)hull, hull->byteCount );
+	hull->hash = b3NonZeroHash( b3Hash( B3_HASH_INIT, (uint8_t*)hull, hull->byteCount ) );
 
 	return hull;
 }
@@ -2271,7 +2271,7 @@ b3HullData* b3CloneHull( const b3HullData* hull )
 		return NULL;
 	}
 
-	b3HullData* clone = b3Alloc( hull->byteCount );
+	b3HullData* clone = (b3HullData*)b3Alloc( hull->byteCount );
 	memcpy( clone, hull, hull->byteCount );
 
 	return clone;
@@ -2279,7 +2279,9 @@ b3HullData* b3CloneHull( const b3HullData* hull )
 
 uint64_t b3HashHullData( const b3HullData* hull )
 {
-	return hull->hash;
+	// The baked content hash already covers byteCount. Spread the 32 bits across 64 so the table
+	// can use the high bits for its fast reject fragment.
+	return (uint64_t)hull->hash * 0x9E3779B97F4A7C15ull;
 }
 
 bool b3CompareHullData( const b3HullData* hull1, const b3HullData* hull2 )
@@ -2300,9 +2302,8 @@ bool b3CompareHullData( const b3HullData* hull1, const b3HullData* hull2 )
 // Hull identity covers every byte, so the structs carry explicit padding. These lock
 // the layout, re-audit padding if a size changes.
 _Static_assert( sizeof( b3HullData ) == 144, "unexpected hull data size" );
-_Static_assert( sizeof( b3BoxHull ) == 640, "unexpected box hull size" );
+_Static_assert( sizeof( b3BoxHull ) == 648, "unexpected box hull size" );
 
-// Implement b3HullMap.
 #define NAME b3HullMap
 #define KEY_TY const b3HullData*
 #define VAL_TY int
@@ -2348,9 +2349,9 @@ b3HullData* b3CloneAndTransformHull( const b3HullData* original, b3Transform tra
 		{
 			const b3HullFace* face = faces + i;
 
-			int startEdgeIndex = face->edge;
-			int currentEdgeIndex = startEdgeIndex;
-			int prevEdgeIndex = B3_NULL_INDEX;
+			uint8_t startEdgeIndex = face->edge;
+			uint8_t currentEdgeIndex = startEdgeIndex;
+			uint8_t prevEdgeIndex = UINT8_MAX;
 
 			do
 			{
@@ -2366,7 +2367,7 @@ b3HullData* b3CloneAndTransformHull( const b3HullData* original, b3Transform tra
 			}
 			while ( currentEdgeIndex != startEdgeIndex );
 
-			B3_ASSERT( prevEdgeIndex != B3_NULL_INDEX );
+			B3_ASSERT( prevEdgeIndex != UINT8_MAX );
 
 			currentEdgeIndex = startEdgeIndex;
 
@@ -2374,7 +2375,7 @@ b3HullData* b3CloneAndTransformHull( const b3HullData* original, b3Transform tra
 			{
 				b3HullHalfEdge* edge = edges + currentEdgeIndex;
 				uint8_t nextIndex = edge->next;
-				edge->next = (uint8_t)prevEdgeIndex;
+				edge->next = prevEdgeIndex;
 
 				if ( currentEdgeIndex < edge->twin )
 				{
@@ -2493,9 +2494,8 @@ b3HullData* b3CloneAndTransformHull( const b3HullData* original, b3Transform tra
 		return NULL;
 	}
 
-	// Must ensure the hash is 0 so it doesn't contribute to itself.
 	hull->hash = 0;
-	hull->hash = b3Hash64NonZero( (uint8_t*)hull, hull->byteCount );
+	hull->hash = b3NonZeroHash( b3Hash( B3_HASH_INIT, (uint8_t*)hull, hull->byteCount ) );
 
 	B3_VALIDATE( b3IsValidHull( hull ) );
 
@@ -2773,8 +2773,6 @@ static const b3BoxHull s_boxHull = {
 
 b3BoxHull b3MakeTransformedBoxHull( float hx, float hy, float hz, b3Transform transform )
 {
-	B3_ASSERT( b3IsValidTransform( transform ) );
-
 	b3BoxHull boxHull = s_boxHull;
 
 	float minH = 0.2f * B3_LINEAR_SLOP;
@@ -2863,9 +2861,8 @@ b3BoxHull b3MakeTransformedBoxHull( float hx, float hy, float hz, b3Transform tr
 	boxHull.nz[6] = 0.0f;
 	boxHull.nz[7] = 0.0f;
 
-	// Must ensure the hash is 0 so it doesn't contribute to itself.
 	boxHull.base.hash = 0;
-	boxHull.base.hash = b3Hash64NonZero( (uint8_t*)&boxHull.base, boxHull.base.byteCount );
+	boxHull.base.hash = b3NonZeroHash( b3Hash( B3_HASH_INIT, (uint8_t*)&boxHull, sizeof( b3BoxHull ) ) );
 
 	return boxHull;
 }
@@ -2938,8 +2935,6 @@ void b3ScaleBox( b3Vec3* halfWidths, b3Transform* transform, b3Vec3 postScale, f
 // todo use new hull scaling technique
 b3BoxHull b3MakeScaledBoxHull( b3Vec3 halfWidths, b3Transform transform, b3Vec3 postScale )
 {
-	B3_ASSERT( b3IsValidTransform( transform ) );
-
 	b3Vec3 h = halfWidths;
 	b3Transform xf = transform;
 	b3ScaleBox( &h, &xf, postScale, 4.0f * B3_LINEAR_SLOP );

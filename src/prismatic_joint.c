@@ -596,7 +596,82 @@ void b3SolvePrismaticJoint( b3JointSim* base, b3StepContext* context, bool useBi
 		}
 	}
 
-	// Orientation and point-to-line are solved by b3SolveJoints_Direct.
+	// Rotation constraint
+	if ( fixedRotation == false )
+	{
+		b3Vec3 bias = { 0.0f, 0.0f, 0.0f };
+		float massScale = 1.0f;
+		float impulseScale = 0.0f;
+
+		if ( useBias )
+		{
+			b3Quat quatA = b3MulQuat( stateA->deltaRotation, joint->frameA.q );
+			b3Quat quatB = b3MulQuat( stateB->deltaRotation, joint->frameB.q );
+
+			b3Quat relQ = b3InvMulQuat( quatA, quatB );
+			b3Quat targetQuat = b3Quat_identity;
+			b3Vec3 deltaRotation = b3DeltaQuatToRotation( relQ, targetQuat );
+			b3Vec3 c = b3Neg( b3RotateVector( quatA, deltaRotation ) );
+
+			bias = b3MulSV( base->constraintSoftness.biasRate, c );
+			massScale = base->constraintSoftness.massScale;
+			impulseScale = base->constraintSoftness.impulseScale;
+		}
+
+		b3Vec3 cdot = b3Sub( wB, wA );
+		b3Vec3 impulse = b3Sub(
+			b3MulSV( -massScale, b3MulMV( joint->rotationMass, b3Add( cdot, bias ) ) ),
+			b3MulSV( impulseScale, joint->angularImpulse ) );
+		joint->angularImpulse = b3Add( joint->angularImpulse, impulse );
+
+		wA = b3Sub( wA, b3MulMV( iA, impulse ) );
+		wB = b3Add( wB, b3MulMV( iB, impulse ) );
+	}
+
+	// Solve point-to-line constraint
+	{
+		b3Vec3 perpY = b3RotateVector( stateA->deltaRotation, joint->perpAxisY );
+		b3Vec3 perpZ = b3RotateVector( stateA->deltaRotation, joint->perpAxisZ );
+
+		b3Vec2 bias = { 0.0f, 0.0f };
+		float massScale = 1.0f;
+		float impulseScale = 0.0f;
+		if ( useBias )
+		{
+			b3Vec2 c = { b3Dot( perpY, d ), b3Dot( perpZ, d ) };
+			bias = b3MulSV2( base->constraintSoftness.biasRate, c );
+			massScale = base->constraintSoftness.massScale;
+			impulseScale = base->constraintSoftness.impulseScale;
+		}
+
+		b3Vec3 vRel = b3Sub( b3Sub( b3Add( vB, b3Cross( wB, rB ) ), vA ), b3Cross( wA, b3Add( rA, d ) ) );
+		b3Vec2 cdot = { b3Dot( perpY, vRel ), b3Dot( perpZ, vRel ) };
+
+		// K = [(1/mA + 1/mB) * eye(2) - skew(rA) * invIA * skew(rA) - skew(rB) * invIB * skew(rB)]
+		// Jx = [-perpX, -cross(d + rA, perpX), perpX, cross(rB, perpX)]
+		b3Vec3 sAy = b3Cross( b3Add( rA, d ), perpY );
+		b3Vec3 sBy = b3Cross( rB, perpY );
+		b3Vec3 sAz = b3Cross( b3Add( rA, d ), perpZ );
+		b3Vec3 sBz = b3Cross( rB, perpZ );
+
+		float kyy = mA + mB + b3Dot( sAy, b3MulMV( iA, sAy ) ) + b3Dot( sBy, b3MulMV( iB, sBy ) );
+		float kyz = b3Dot( sAy, b3MulMV( iA, sAz ) ) + b3Dot( sBy, b3MulMV( iB, sBz ) );
+		float kzz = mA + mB + b3Dot( sAz, b3MulMV( iA, sAz ) ) + b3Dot( sBz, b3MulMV( iB, sBz ) );
+
+		b3Matrix2 K = { { kyy, kyz }, { kyz, kzz } };
+
+		b3Vec2 oldImpulse = joint->perpImpulse;
+		b3Vec2 sol = b3Solve2( K, b3Add2( cdot, bias ) );
+		b3Vec2 deltaImpulse = b3Sub2( b3MulSV2( -massScale, sol ), b3MulSV2( impulseScale, oldImpulse ) );
+		joint->perpImpulse = b3Add2( oldImpulse, deltaImpulse );
+
+		b3Vec3 P = b3Blend2( deltaImpulse.x, perpY, deltaImpulse.y, perpZ );
+
+		vA = b3MulSub( vA, mA, P );
+		wA = b3Sub( wA, b3MulMV( iA, b3Blend2( deltaImpulse.x, sAy, deltaImpulse.y, sAz ) ) );
+		vB = b3MulAdd( vB, mB, P );
+		wB = b3Add( wB, b3MulMV( iB, b3Blend2( deltaImpulse.x, sBy, deltaImpulse.y, sBz ) ) );
+	}
 
 	B3_ASSERT( b3IsValidVec3( vA ) );
 	B3_ASSERT( b3IsValidVec3( wA ) );

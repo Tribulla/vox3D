@@ -20,7 +20,6 @@
 #include <stdint.h>
 #include <stdio.h>
 #include <stdlib.h>
-#include <string.h>
 
 #define BOX3D_USER_SHAPE_CAPACITY 65536
 #define BOX3D_FREELIST_END ( -1 )
@@ -35,6 +34,7 @@ typedef enum
 	Box3DUS_Mesh,
 	Box3DUS_HeightField,
 	Box3DUS_Compound,
+	Box3DUS_Voxel,
 } DebugShapeKind;
 
 typedef struct
@@ -76,6 +76,9 @@ typedef struct
 	// owning body transform. Identity transform and no sibling for top-level shapes.
 	int nextChild;
 	b3Transform childTransform;
+
+	bool isBox;
+	b3Vec3 boxOffset;
 	union
 	{
 		DebugSphere sphere;
@@ -91,6 +94,13 @@ typedef struct
 			int* childMap;
 			int childMapCount;
 		} compound;
+		struct
+		{
+			MeshHandle handle;
+			b3Vec3* centers;
+			int count;
+			float voxelSize;
+		} voxel;
 	};
 } DebugShape;
 
@@ -107,6 +117,9 @@ typedef struct
 	DebugShape pool[BOX3D_USER_SHAPE_CAPACITY];
 	int firstFree;
 	int allocCount;
+
+	// For the ground grid
+	b3ShapeId groundShapeId;
 
 	// Per-shape PBR overrides
 	MaterialOverride materialOverrides[BOX3D_MATERIAL_OVERRIDE_CAPACITY];
@@ -153,6 +166,7 @@ void InitAdapter( void )
 	}
 	s_adapter.firstFree = 0;
 	s_adapter.allocCount = 0;
+	s_adapter.groundShapeId = b3_nullShapeId;
 	s_adapter.materialOverrideCount = 0;
 	s_adapter.selectedBodyId = b3_nullBodyId;
 	s_adapter.selectedShapeId = b3_nullShapeId;
@@ -186,12 +200,19 @@ void ResetAdapterPool( void )
 			free( us->compound.childMap );
 			us->compound.childMap = NULL;
 		}
+		else if ( us->kind == Box3DUS_Voxel )
+		{
+			ReleaseMeshReference( us->voxel.handle );
+			free( us->voxel.centers );
+			us->voxel.centers = NULL;
+		}
 		us->kind = Box3DUS_Free;
 		us->nextFree = ( i + 1 < BOX3D_USER_SHAPE_CAPACITY ) ? ( i + 1 ) : BOX3D_FREELIST_END;
 	}
 	s_adapter.firstFree = 0;
 	s_adapter.allocCount = 0;
 
+	s_adapter.groundShapeId = b3_nullShapeId;
 	s_adapter.materialOverrideCount = 0;
 	s_adapter.selectedBodyId = b3_nullBodyId;
 	s_adapter.selectedShapeId = b3_nullShapeId;
@@ -260,12 +281,7 @@ int GetLastCompoundDrawStats( int* outTotal )
 
 void SetGroundShape( b3ShapeId shapeId )
 {
-	if ( b3Shape_IsValid( shapeId ) == false )
-	{
-		return;
-	}
-
-	b3Shape_SetName( shapeId, BOX3D_GROUND_SHAPE_NAME );
+	s_adapter.groundShapeId = shapeId;
 }
 
 void SetShapeMaterial( b3ShapeId shapeId, Vec4 color, float metallic, float roughness )
@@ -455,10 +471,31 @@ static void PopulateCommonFields( DebugShape* us, const b3DebugShape* debugShape
 {
 	const b3BodyId bodyId = b3Shape_GetBody( debugShape->shapeId );
 	us->bodyType = b3Body_GetType( bodyId );
-	us->isGround = strcmp( b3Shape_GetName( debugShape->shapeId ), BOX3D_GROUND_SHAPE_NAME ) == 0;
+	us->isGround = B3_ID_EQUALS( debugShape->shapeId, s_adapter.groundShapeId );
 	us->shapeId = debugShape->shapeId;
 	us->bodyId = bodyId;
+	us->isBox = false;
+	us->boxOffset = b3Vec3_zero;
 	RefreshMaterialFromOverride( us );
+}
+
+static bool ResolveBoxHull( const b3HullData* hull, b3Vec3* offsetOut, b3Vec3* scaleOut )
+{
+	if ( hull == NULL || hull->vertexCount != 8 || hull->faceCount != 6 )
+	{
+		return false;
+	}
+	b3Vec3 lo = hull->aabb.lowerBound;
+	b3Vec3 hi = hull->aabb.upperBound;
+	b3Vec3 ext = b3Sub( hi, lo );
+	float aabbVol = ext.x * ext.y * ext.z;
+	if ( aabbVol <= 0.0f || fabsf( hull->volume - aabbVol ) > 1e-4f * aabbVol )
+	{
+		return false;
+	}
+	*offsetOut = b3MulSV( 0.5f, b3Add( lo, hi ) );
+	*scaleOut = ext; // unit cube [-0.5,0.5] * ext == [lo,hi] about the centre
+	return true;
 }
 
 // Resolve one compound child into its own pool slot, mirroring the top-level
@@ -502,6 +539,8 @@ static int CreateCompoundChild( const b3ChildShape* child, const DebugShape* par
 	us->color = parent->color;
 	us->metallic = parent->metallic;
 	us->roughness = parent->roughness;
+	us->isBox = false; // compound children keep the baked-geometry hull path
+	us->boxOffset = b3Vec3_zero;
 
 	switch ( child->type )
 	{
@@ -575,7 +614,9 @@ static void* AdapterCreateDebugShape( const b3DebugShape* debugShape, void* cont
 	if ( debugShape->type == b3_hullShape )
 	{
 		const b3HullData* hull = debugShape->hull;
-		MeshHandle handle = FindOrAddHull( hull );
+		b3Vec3 boxOffset, boxScale;
+		bool isBox = ResolveBoxHull( hull, &boxOffset, &boxScale );
+		MeshHandle handle = isBox ? FindOrAddUnitBox() : FindOrAddHull( hull );
 		if ( !IsMeshHandleValid( handle ) )
 		{
 			return NULL;
@@ -590,7 +631,9 @@ static void* AdapterCreateDebugShape( const b3DebugShape* debugShape, void* cont
 		us->kind = Box3DUS_Hull;
 		PopulateCommonFields( us, debugShape );
 		us->geom.handle = handle;
-		us->geom.scale = b3Vec3_one;
+		us->geom.scale = isBox ? boxScale : b3Vec3_one;
+		us->isBox = isBox;
+		us->boxOffset = isBox ? boxOffset : b3Vec3_zero;
 		return us;
 	}
 
@@ -694,6 +737,57 @@ static void* AdapterCreateDebugShape( const b3DebugShape* debugShape, void* cont
 		return us;
 	}
 
+	if ( debugShape->type == b3_voxelShape )
+	{
+		const b3VoxelData* vd = debugShape->voxel;
+		if ( vd == NULL )
+		{
+			return NULL;
+		}
+		MeshHandle handle = FindOrAddUnitBox();
+		if ( !IsMeshHandleValid( handle ) )
+		{
+			return NULL;
+		}
+		const int cellCount = b3VoxelData_GetCellCount( vd );
+		const float voxelSize = b3VoxelData_GetVoxelSize( vd );
+		b3Vec3* centers = NULL;
+		int count = 0;
+		if ( cellCount > 0 )
+		{
+			b3Vec3i* cells = (b3Vec3i*)malloc( (size_t)cellCount * sizeof( b3Vec3i ) );
+			centers = (b3Vec3*)malloc( (size_t)cellCount * sizeof( b3Vec3 ) );
+			if ( cells == NULL || centers == NULL )
+			{
+				free( cells );
+				free( centers );
+				ReleaseMeshReference( handle );
+				return NULL;
+			}
+			count = b3VoxelData_GetCells( vd, cells, cellCount );
+			for ( int i = 0; i < count; ++i )
+			{
+				centers[i] = (b3Vec3){ cells[i].x * voxelSize, cells[i].y * voxelSize, cells[i].z * voxelSize };
+			}
+			free( cells );
+		}
+		const int index = AllocDebugShape();
+		if ( index < 0 )
+		{
+			free( centers );
+			ReleaseMeshReference( handle );
+			return NULL;
+		}
+		DebugShape* us = &s_adapter.pool[index];
+		us->kind = Box3DUS_Voxel;
+		PopulateCommonFields( us, debugShape );
+		us->voxel.handle = handle;
+		us->voxel.centers = centers;
+		us->voxel.count = count;
+		us->voxel.voxelSize = voxelSize;
+		return us;
+	}
+
 	// Unknown shape type. Return NULL so Box3D skips drawing it.
 	return NULL;
 }
@@ -727,6 +821,12 @@ static void DestroyDebugShape( void* userShape, void* context )
 	else if ( us->kind == Box3DUS_Hull || us->kind == Box3DUS_Mesh || us->kind == Box3DUS_HeightField )
 	{
 		ReleaseMeshReference( us->geom.handle );
+	}
+	else if ( us->kind == Box3DUS_Voxel )
+	{
+		ReleaseMeshReference( us->voxel.handle );
+		free( us->voxel.centers );
+		us->voxel.centers = NULL;
 	}
 
 	const int index = (int)( us - s_adapter.pool );
@@ -768,10 +868,27 @@ static void AppendResolvedShape( const DebugShape* us, b3Transform baseTransform
 	{
 		MeshMaterialMode mode = us->isGround ? MESH_MATERIAL_MODE_GROUND_GRID : MESH_MATERIAL_MODE_SOLID;
 		float cell = us->isGround ? BOX3D_GROUND_GRID_CELL_SIZE : 0.0f;
-		AppendMesh( us->geom.handle, baseTransform, us->geom.scale, c, metallic, roughness, mode, cell, shadowCast );
+		b3Transform t = us->isBox ? (b3Transform){ b3TransformPoint( baseTransform, us->boxOffset ), baseTransform.q }
+								  : baseTransform;
+		AppendMesh( us->geom.handle, t, us->geom.scale, c, metallic, roughness, mode, cell, shadowCast );
 		if ( hk != HIGHLIGHT_KIND_NONE )
 		{
-			AppendHighlightGeometry( us->geom.handle, baseTransform, us->geom.scale, hk );
+			AppendHighlightGeometry( us->geom.handle, t, us->geom.scale, hk );
+		}
+	}
+	else if ( us->kind == Box3DUS_Voxel )
+	{
+		b3Vec3 scale = { us->voxel.voxelSize, us->voxel.voxelSize, us->voxel.voxelSize };
+		Vec4 vc = c;
+		vc.w = 1.0f;
+		for ( int i = 0; i < us->voxel.count; ++i )
+		{
+			b3Transform t = { b3TransformPoint( baseTransform, us->voxel.centers[i] ), baseTransform.q };
+			AppendMesh( us->voxel.handle, t, scale, vc, metallic, roughness, MESH_MATERIAL_MODE_SOLID, 0.0f, shadowCast );
+			if ( hk != HIGHLIGHT_KIND_NONE )
+			{
+				AppendHighlightGeometry( us->voxel.handle, t, scale, hk );
+			}
 		}
 	}
 }

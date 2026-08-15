@@ -13,4 +13,6 @@ CMakeUserPresets.json
 .fetchcontent-cache/
 *.b3rec
 Superluminal/
+fracturing engine/
+/KrunchX
 build-dp/

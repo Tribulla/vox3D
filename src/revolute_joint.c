@@ -384,8 +384,6 @@ void b3SolveRevoluteJoint( b3JointSim* base, b3StepContext* context, bool useBia
 {
 	float mA = base->invMassA;
 	float mB = base->invMassB;
-	B3_UNUSED( mA );
-	B3_UNUSED( mB );
 	b3Matrix3 iA = base->invIA;
 	b3Matrix3 iB = base->invIB;
 
@@ -515,7 +513,90 @@ void b3SolveRevoluteJoint( b3JointSim* base, b3StepContext* context, bool useBia
 		}
 	}
 
-	// Collinearity and point-to-point are solved by b3SolveJoints_Direct.
+	// Collinearity constraint
+	if ( fixedRotation == false )
+	{
+		b3Vec2 bias = { 0.0f, 0.0f };
+		float massScale = 1.0f;
+		float impulseScale = 0.0f;
+
+		if ( useBias )
+		{
+			b3Vec2 c = { relQ.v.x, relQ.v.y };
+			bias = b3MulSV2( base->constraintSoftness.biasRate, c );
+			massScale = base->constraintSoftness.massScale;
+			impulseScale = base->constraintSoftness.impulseScale;
+		}
+
+		// Collinearity constraint as 2-by-2
+		b3Vec3 perpAxisX =
+			b3MulSV( 0.5f, b3RotateVector( quatA, b3Add( b3MulSV( relQ.s, b3Vec3_axisX ), b3Cross( relQ.v, b3Vec3_axisX ) ) ) );
+		b3Vec3 perpAxisY =
+			b3MulSV( 0.5f, b3RotateVector( quatA, b3Add( b3MulSV( relQ.s, b3Vec3_axisY ), b3Cross( relQ.v, b3Vec3_axisY ) ) ) );
+		joint->perpAxisX = perpAxisX;
+		joint->perpAxisY = perpAxisY;
+
+		b3Matrix3 invInertiaSum = b3AddMM( iA, iB );
+		float kxx = b3Dot( perpAxisX, b3MulMV( invInertiaSum, perpAxisX ) );
+		float kyy = b3Dot( perpAxisY, b3MulMV( invInertiaSum, perpAxisY ) );
+		float kxy = b3Dot( perpAxisX, b3MulMV( invInertiaSum, perpAxisY ) );
+
+		b3Matrix2 k = { { kxx, kxy }, { kxy, kyy } };
+
+		b3Vec3 wRel = b3Sub( wB, wA );
+		b3Vec2 cdot = { b3Dot( wRel, perpAxisX ), b3Dot( wRel, perpAxisY ) };
+		b3Vec2 oldImpulse = joint->perpImpulse;
+		b3Vec2 sol = b3Solve2( k, b3Add2( cdot, bias ) );
+		b3Vec2 deltaImpulse = b3Sub2( b3MulSV2( -massScale, sol ), b3MulSV2( impulseScale, oldImpulse ) );
+		joint->perpImpulse = b3Add2( joint->perpImpulse, deltaImpulse );
+
+		b3Vec3 angularImpulse = b3Add( b3MulSV( deltaImpulse.x, perpAxisX ), b3MulSV( deltaImpulse.y, perpAxisY ) );
+		wA = b3Sub( wA, b3MulMV( iA, angularImpulse ) );
+		wB = b3Add( wB, b3MulMV( iB, angularImpulse ) );
+	}
+
+	// Solve point-to-point constraint
+	{
+		b3Vec3 rA = b3RotateVector( stateA->deltaRotation, joint->frameA.p );
+		b3Vec3 rB = b3RotateVector( stateB->deltaRotation, joint->frameB.p );
+
+		b3Vec3 cdot = b3Sub( b3Sub( b3Add( vB, b3Cross( wB, rB ) ), vA ), b3Cross( wA, rA ) );
+
+		b3Vec3 bias = b3Vec3_zero;
+		float massScale = 1.0f;
+		float impulseScale = 0.0f;
+		if ( useBias )
+		{
+			b3Vec3 dcA = stateA->deltaPosition;
+			b3Vec3 dcB = stateB->deltaPosition;
+
+			b3Vec3 separation = b3Add( b3Add( b3Sub( dcB, dcA ), b3Sub( rB, rA ) ), joint->deltaCenter );
+
+			bias = b3MulSV( base->constraintSoftness.biasRate, separation );
+			massScale = base->constraintSoftness.massScale;
+			impulseScale = base->constraintSoftness.impulseScale;
+		}
+
+		//// K = [(1/m1 + 1/m2) * eye(2) - skew(r1) * invI1 * skew(r1) - skew(r2) * invI2 * skew(r2)]
+		b3Matrix3 sA = b3Skew( rA );
+		b3Matrix3 sB = b3Skew( rB );
+		b3Matrix3 kA = b3MulMM( sA, b3MulMM( base->invIA, sA ) );
+		b3Matrix3 kB = b3MulMM( sB, b3MulMM( base->invIB, sB ) );
+		b3Matrix3 k = b3NegateMat3( b3AddMM( kA, kB ) );
+		k.cx.x += mA + mB;
+		k.cy.y += mA + mB;
+		k.cz.z += mA + mB;
+
+		b3Vec3 b = b3Solve3( k, b3Add( cdot, bias ) );
+
+		b3Vec3 impulse = b3Sub( b3MulSV( -massScale, b ), b3MulSV( impulseScale, joint->linearImpulse ) );
+		joint->linearImpulse = b3Add( joint->linearImpulse, impulse );
+
+		vA = b3MulSub( vA, mA, impulse );
+		wA = b3Sub( wA, b3MulMV( iA, b3Cross( rA, impulse ) ) );
+		vB = b3MulAdd( vB, mB, impulse );
+		wB = b3Add( wB, b3MulMV( iB, b3Cross( rB, impulse ) ) );
+	}
 
 	if ( stateA->flags & b3_dynamicFlag )
 	{

@@ -9,8 +9,8 @@
 
 #include <math.h>
 
-#define OVERFLOW_PILE_RING_COUNT 5
-#define OVERFLOW_PILE_PER_RING 5
+#define OVERFLOW_PILE_PER_RING 8
+#define OVERFLOW_PILE_RING_COUNT ( ( B3_GRAPH_COLOR_COUNT - 4 ) / OVERFLOW_PILE_PER_RING + 3 )
 
 OverflowColorPileData CreateOverflowColorPile( b3WorldId worldId )
 {
