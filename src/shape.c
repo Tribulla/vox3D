@@ -13,7 +13,6 @@
 // needed for dll export
 #include "aabb.h"
 #include "compound.h"
-#include "voxel_shape.h"
 
 #include "box3d/box3d.h"
 
@@ -55,13 +54,6 @@ static float b3ComputeShapeMargin( b3Shape* shape )
 				maxExtentSqr = b3MaxFloat( maxExtentSqr, distSqr );
 			}
 			margin = sqrtf( maxExtentSqr );
-		}
-		break;
-
-		case b3_voxelShape:
-		{
-			b3AABB bounds = b3VoxelData_GetBounds( shape->voxel );
-			margin = b3Length( b3AABB_Extents( bounds ) );
 		}
 		break;
 
@@ -168,10 +160,6 @@ static b3Shape* b3CreateShapeInternal( b3World* world, b3Body* body, b3WorldTran
 
 		case b3_heightShape:
 			shape->heightField = (b3HeightFieldData*)geometry;
-			break;
-
-		case b3_voxelShape:
-			shape->voxel = (const b3VoxelData*)geometry;
 			break;
 
 		default:
@@ -364,7 +352,14 @@ b3ShapeId b3CreateCapsuleShape( b3BodyId bodyId, const b3ShapeDef* def, const b3
 b3ShapeId b3CreateHullShape( b3BodyId bodyId, const b3ShapeDef* def, const b3HullData* hull )
 {
 	B3_VALIDATE( b3IsValidHull( hull ) );
-	B3_VALIDATE( hull->hash != 0 );
+	B3_ASSERT( hull->version == B3_HULL_VERSION );
+	B3_ASSERT( hull->hash != 0 );
+
+	if ( hull->version != B3_HULL_VERSION )
+	{
+		return b3_nullShapeId;
+	}
+
 	b3ShapeId shapeId = b3CreateShape( bodyId, def, hull, b3_hullShape, b3Transform_identity, b3Vec3_one, false );
 	if ( shapeId.index1 != 0 )
 	{
@@ -383,6 +378,14 @@ b3ShapeId b3CreateTransformedHullShape( b3BodyId bodyId, const b3ShapeDef* def, 
 										b3Vec3 scale )
 {
 	B3_VALIDATE( b3IsValidHull( hull ) );
+	B3_ASSERT( hull->version == B3_HULL_VERSION );
+	B3_ASSERT( hull->hash != 0 );
+
+	if ( hull->version != B3_HULL_VERSION )
+	{
+		return b3_nullShapeId;
+	}
+
 	b3ShapeId shapeId = b3CreateShape( bodyId, def, hull, b3_hullShape, transform, scale, true );
 	if ( shapeId.index1 != 0 )
 	{
@@ -404,7 +407,14 @@ b3ShapeId b3CreateTransformedHullShape( b3BodyId bodyId, const b3ShapeDef* def, 
 b3ShapeId b3CreateMeshShape( b3BodyId bodyId, const b3ShapeDef* def, const b3MeshData* mesh, b3Vec3 scale )
 {
 	B3_VALIDATE( b3IsValidMesh( mesh ) );
-	B3_VALIDATE( mesh->hash != 0 );
+	B3_ASSERT( mesh->version == B3_MESH_VERSION );
+	B3_ASSERT( mesh->hash != 0 );
+
+	if ( mesh->version != B3_MESH_VERSION )
+	{
+		return b3_nullShapeId;
+	}
+
 	b3ShapeId shapeId = b3CreateShape( bodyId, def, mesh, b3_meshShape, b3Transform_identity, scale, true );
 	if ( shapeId.index1 != 0 )
 	{
@@ -421,7 +431,14 @@ b3ShapeId b3CreateMeshShape( b3BodyId bodyId, const b3ShapeDef* def, const b3Mes
 
 b3ShapeId b3CreateHeightFieldShape( b3BodyId bodyId, const b3ShapeDef* def, const b3HeightFieldData* heightField )
 {
-	B3_VALIDATE( heightField->hash != 0 );
+	B3_ASSERT( heightField->version == B3_HEIGHT_FIELD_VERSION );
+	B3_ASSERT( heightField->hash != 0 );
+
+	if ( heightField->version != B3_HEIGHT_FIELD_VERSION )
+	{
+		return b3_nullShapeId;
+	}
+
 	b3ShapeId shapeId = b3CreateShape( bodyId, def, heightField, b3_heightShape, b3Transform_identity, b3Vec3_one, false );
 	if ( shapeId.index1 != 0 )
 	{
@@ -436,14 +453,15 @@ b3ShapeId b3CreateHeightFieldShape( b3BodyId bodyId, const b3ShapeDef* def, cons
 	return shapeId;
 }
 
-b3ShapeId b3CreateVoxelShape( b3BodyId bodyId, const b3ShapeDef* def, const b3VoxelData* voxels )
-{
-	B3_VALIDATE( voxels != NULL );
-	return b3CreateShape( bodyId, def, voxels, b3_voxelShape, b3Transform_identity, b3Vec3_one, false );
-}
-
 b3ShapeId b3CreateBakedCompoundShape( b3BodyId bodyId, b3ShapeDef* def, const b3CompoundData* compound )
 {
+	B3_ASSERT( compound->version == B3_COMPOUND_VERSION );
+
+	if ( compound->version != B3_COMPOUND_VERSION )
+	{
+		return b3_nullShapeId;
+	}
+
 	b3ShapeId shapeId = b3CreateShape( bodyId, def, compound, b3_compoundShape, b3Transform_identity, b3Vec3_one, false );
 	if ( shapeId.index1 != 0 )
 	{
@@ -579,90 +597,6 @@ void b3DestroyShape( b3ShapeId shapeId, bool updateBodyMass )
 	world->locked = false;
 }
 
-const b3VoxelData* b3GetShapeVoxelData( b3World* world, b3ShapeId shapeId )
-{
-	b3Shape* shape = b3GetShape( world, shapeId );
-	if ( shape == NULL || shape->type != b3_voxelShape )
-		return NULL;
-	return shape->voxel;
-}
-
-void b3Shape_RemoveVoxelCells( b3World* world, b3ShapeId shapeId, const b3Vec3i* cells, int count )
-{
-	if ( world == NULL || count <= 0 )
-		return;
-	b3Shape* shape = b3GetShape( world, shapeId );
-	if ( shape == NULL || shape->type != b3_voxelShape )
-		return;
-
-	b3Voxel_RemoveCells( (b3VoxelData*)shape->voxel, cells, count );
-
-	shape->localCentroid = b3GetShapeCentroid( shape );
-	shape->aabbMargin = b3ComputeShapeMargin( shape );
-
-	b3Body* body = b3Array_Get( world->bodies, shape->bodyId );
-	b3WorldTransform transform = b3GetBodyTransformQuick( world, body );
-	if ( shape->proxyKey != B3_NULL_INDEX )
-	{
-		b3BodyType proxyType = B3_PROXY_TYPE( shape->proxyKey );
-		b3UpdateShapeAABBs( shape, transform, proxyType );
-		b3BroadPhase_MoveProxy( &world->broadPhase, shape->proxyKey, shape->fatAABB );
-	}
-	else
-	{
-		b3UpdateShapeAABBs( shape, transform, body->type );
-	}
-
-	b3UpdateBodyMassData( world, body );
-}
-
-void b3Shape_AddVoxelCells( b3World* world, b3ShapeId shapeId, const b3Vec3i* cells, const uint16_t* geomIndices,
-							int count )
-{
-	if ( world == NULL || count <= 0 )
-		return;
-	b3Shape* shape = b3GetShape( world, shapeId );
-	if ( shape == NULL || shape->type != b3_voxelShape )
-		return;
-
-	b3Voxel_AddCellsEx( (b3VoxelData*)shape->voxel, cells, geomIndices, count );
-
-	// Refresh the shape-local derived fields the same way shape creation does.
-	shape->localCentroid = b3GetShapeCentroid( shape );
-	shape->aabbMargin = b3ComputeShapeMargin( shape );
-
-	b3Body* body = b3Array_Get( world->bodies, shape->bodyId );
-	b3WorldTransform transform = b3GetBodyTransformQuick( world, body );
-	if ( shape->proxyKey != B3_NULL_INDEX )
-	{
-		b3BodyType proxyType = B3_PROXY_TYPE( shape->proxyKey );
-		b3UpdateShapeAABBs( shape, transform, proxyType );
-		b3BroadPhase_MoveProxy( &world->broadPhase, shape->proxyKey, shape->fatAABB );
-	}
-	else
-	{
-		b3UpdateShapeAABBs( shape, transform, body->type );
-	}
-
-	b3UpdateBodyMassData( world, body );
-}
-
-void b3VoxelShape_AddCells( b3ShapeId shapeId, const b3Vec3i* cells, const uint16_t* geomIndices, int count )
-{
-	b3World* world = b3GetUnlockedWorld( shapeId.world0 );
-	if ( world == NULL )
-		return;
-	b3Shape_AddVoxelCells( world, shapeId, cells, geomIndices, count );
-}
-
-void b3VoxelShape_RemoveCells( b3ShapeId shapeId, const b3Vec3i* cells, int count )
-{
-	b3World* world = b3GetUnlockedWorld( shapeId.world0 );
-	if ( world == NULL )
-		return;
-	b3Shape_RemoveVoxelCells( world, shapeId, cells, count );
-}
-
 b3AABB b3ComputeShapeAABB( const b3Shape* shape, b3Transform transform )
 {
 	switch ( shape->type )
@@ -684,9 +618,6 @@ b3AABB b3ComputeShapeAABB( const b3Shape* shape, b3Transform transform )
 
 		case b3_sphereShape:
 			return b3ComputeSphereAABB( &shape->sphere, transform );
-
-		case b3_voxelShape:
-			return b3AABB_Transform( transform, b3VoxelData_GetBounds( shape->voxel ) );
 
 		default:
 		{
@@ -765,11 +696,6 @@ b3Vec3 b3GetShapeCentroid( const b3Shape* shape )
 			b3AABB aabb = b3ComputeHeightFieldAABB( shape->heightField, b3Transform_identity );
 			return b3AABB_Center( aabb );
 		}
-		case b3_voxelShape:
-		{
-			b3AABB aabb = b3VoxelData_GetBounds( shape->voxel );
-			return b3AABB_Center( aabb );
-		}
 		default:
 			return b3Vec3_zero;
 	}
@@ -834,9 +760,6 @@ b3MassData b3ComputeShapeMass( const b3Shape* shape )
 		case b3_sphereShape:
 			return b3ComputeSphereMass( &shape->sphere, shape->density );
 
-		case b3_voxelShape:
-			return b3Voxel_ComputeMass( shape->voxel, shape->density );
-
 		default:
 			return (b3MassData){ 0 };
 	}
@@ -897,20 +820,6 @@ b3ShapeExtent b3ComputeShapeExtent( const b3Shape* shape, b3Vec3 localCenter )
 		}
 		break;
 
-		case b3_voxelShape:
-		{
-			b3AABB aabb = b3VoxelData_GetBounds( shape->voxel );
-			b3Vec3 d1 = b3Sub( localCenter, aabb.lowerBound );
-			b3Vec3 d2 = b3Sub( aabb.upperBound, localCenter );
-			float face = b3MinFloat( b3MinFloat( b3MinFloat( d1.x, d2.x ), b3MinFloat( d1.y, d2.y ) ),
-									 b3MinFloat( d1.z, d2.z ) );
-			float halfCell = 0.5f * b3VoxelData_GetVoxelSize( shape->voxel );
-			extent.minExtent = b3MaxFloat( face, halfCell );
-			b3Vec3 p = b3FarthestPointOnAABB( aabb, localCenter );
-			extent.maxExtent = b3Abs( p );
-		}
-		break;
-
 		default:
 			break;
 	}
@@ -944,9 +853,6 @@ b3CastOutput b3RayCastShape( const b3Shape* shape, b3Transform transform, const 
 			break;
 		case b3_heightShape:
 			output = b3RayCastHeightField( shape->heightField, &localInput );
-			break;
-		case b3_voxelShape:
-			output = b3RayCastVoxel( shape->voxel, &localInput );
 			break;
 		default:
 			return output;
@@ -997,11 +903,6 @@ b3CastOutput b3ShapeCastShape( const b3Shape* shape, b3Transform transform, cons
 		case b3_sphereShape:
 			output = b3ShapeCastSphere( &shape->sphere, &localInput );
 			break;
-
-		case b3_voxelShape:
-			output = b3ShapeCastVoxel( shape->voxel, &localInput );
-			break;
-
 		default:
 			return output;
 	}
@@ -1024,9 +925,6 @@ bool b3OverlapShape( const b3Shape* shape, b3Transform transform, const b3ShapeP
 
 		case b3_heightShape:
 			return b3OverlapHeightField( shape->heightField, transform, proxy );
-
-		case b3_voxelShape:
-			return b3OverlapVoxel( shape->voxel, transform, proxy );
 
 		case b3_hullShape:
 			return b3OverlapHull( shape->hull, transform, proxy );
@@ -1433,6 +1331,8 @@ void b3Shape_SetMeshMaterial( b3ShapeId shapeId, b3SurfaceMaterial surfaceMateri
 
 	B3_ASSERT( 0 <= index && index < shape->materialCount );
 	B3_ASSERT( shape->type != b3_compoundShape );
+
+	B3_REC( world, ShapeSetMeshMaterial, shapeId, surfaceMaterial, index );
 	b3GetShapeMaterials( shape )[index] = surfaceMaterial;
 }
 
@@ -1751,6 +1651,14 @@ void b3Shape_SetHull( b3ShapeId shapeId, const b3HullData* hull )
 		return;
 	}
 
+	if ( world->recording != NULL )
+	{
+		// Intern the shared hull.
+		uint32_t geometryId = b3RecInternHull( world->recording, data );
+		b3RecArgs_ShapeSetHull setArgs = { shapeId, geometryId };
+		b3RecWrite_ShapeSetHull( world->recording, &setArgs );
+	}
+
 	b3DestroyShapeAllocationForShapeChange( world, shape );
 
 	shape->hull = data;
@@ -1777,6 +1685,13 @@ void b3Shape_SetMesh( b3ShapeId shapeId, const b3MeshData* meshData, b3Vec3 scal
 	}
 
 	world->locked = true;
+
+	if ( world->recording != NULL )
+	{
+		uint32_t geometryId = b3RecInternMesh( world->recording, meshData );
+		b3RecArgs_ShapeSetMesh setArgs = { shapeId, geometryId, scale };
+		b3RecWrite_ShapeSetMesh( world->recording, &setArgs );
+	}
 
 	b3Shape* shape = b3GetShape( world, shapeId );
 

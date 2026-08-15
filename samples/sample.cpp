@@ -7,7 +7,7 @@
 
 #include "sample.h"
 
-#include "benchmarks.h" // ResetGroundShapeId / GetGroundShapeId, used by the ground grid
+#include "benchmarks.h"
 #include "gfx/debug_adapter.h"
 #include "gfx/draw.h"
 #include "gfx/gtao.h"
@@ -15,6 +15,7 @@
 #include "gfx/renderer.h"
 #include "gfx/shadow.h"
 #include "gfx/text.h"
+#include "host/gui.h"
 #include "human.h"
 #include "imgui.h"
 #include "implot.h"
@@ -27,7 +28,6 @@
 #include <ctype.h>
 #include <filesystem>
 #include <nfd.h>
-#include <vector>
 #include <stdarg.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -45,18 +45,34 @@ static char* ReadFile( int& size, const char* filename )
 	}
 
 	fseek( file, 0, SEEK_END );
-	size = static_cast<int>( ftell( file ) );
+	long length = ftell( file );
 	fseek( file, 0, SEEK_SET );
 
-	if ( size == 0 )
+	if ( length <= 0 )
 	{
 		fclose( file );
 		return nullptr;
 	}
 
+	size = static_cast<int>( length );
+
 	char* data = (char*)malloc( size + 1 );
-	fread( data, size, 1, file );
+	if ( data == nullptr )
+	{
+		fclose( file );
+		return nullptr;
+	}
+
+	// Short read means a truncated or racing file, so treat it as no file at all
+	size_t read = fread( data, 1, size, file );
 	fclose( file );
+
+	if ( read != (size_t)size )
+	{
+		free( data );
+		return nullptr;
+	}
+
 	data[size] = 0;
 
 	return data;
@@ -100,6 +116,7 @@ void SampleContext::Save()
 	fprintf( file, "  \"enableIbl\": %s,\n", GetIblEnabled() ? "true" : "false" );
 	fprintf( file, "  \"exposure\": %g,\n", GetExposure() );
 	fprintf( file, "  \"sunStrength\": %g,\n", GetSun().strength );
+	fprintf( file, "  \"shadowSplitLambda\": %g,\n", GetShadowSplitLambda() );
 	fprintf( file, "  \"debugView\": %d,\n", debugView );
 	fprintf( file, "  \"drawDistance\": %g,\n", drawDistance );
 	fprintf( file, "  \"showHullEdges\": %s,\n", GetEdgeOverlayParams().showHulls ? "true" : "false" );
@@ -122,6 +139,34 @@ static int jsoneq( const char* json, jsmntok_t* tok, const char* s )
 	return -1;
 }
 
+// Tokens are not terminated, so copy before handing one to strtof or strtol.
+// The settings file is hand editable, so truncate a long token rather than
+// trusting it to fit.
+static void CopyToken( char* buffer, int capacity, const char* json, const jsmntok_t& tok )
+{
+	int count = tok.end - tok.start;
+	if ( count > capacity - 1 )
+	{
+		count = capacity - 1;
+	}
+	memcpy( buffer, json + tok.start, count );
+	buffer[count] = 0;
+}
+
+static float ParseFloat( const char* json, const jsmntok_t& tok )
+{
+	char buffer[32];
+	CopyToken( buffer, (int)sizeof( buffer ), json, tok );
+	return strtof( buffer, nullptr );
+}
+
+static int ParseInt( const char* json, const jsmntok_t& tok )
+{
+	char buffer[32];
+	CopyToken( buffer, (int)sizeof( buffer ), json, tok );
+	return (int)strtol( buffer, nullptr, 10 );
+}
+
 void SampleContext::Load()
 {
 	recycleDistance = B3_CONTACT_RECYCLE_DISTANCE;
@@ -142,19 +187,12 @@ void SampleContext::Load()
 	jsmn_init( &parser );
 
 	int tokenCount = jsmn_parse( &parser, data, size, tokens, MAX_TOKENS );
-	char buffer[32];
 
 	for ( int i = 0; i < tokenCount; ++i )
 	{
 		if ( jsoneq( data, &tokens[i], "sampleIndex" ) == 0 )
 		{
-			int count = tokens[i + 1].end - tokens[i + 1].start;
-			assert( count < 32 );
-			const char* s = data + tokens[i + 1].start;
-			strncpy( buffer, s, count );
-			buffer[count] = 0;
-			char* dummy;
-			sampleIndex = (int)strtol( buffer, &dummy, 10 );
+			sampleIndex = ParseInt( data, tokens[i + 1] );
 
 			if ( sampleIndex < 0 )
 			{
@@ -182,12 +220,7 @@ void SampleContext::Load()
 		}
 		else if ( jsoneq( data, &tokens[i], "gtaoQuality" ) == 0 )
 		{
-			int count = tokens[i + 1].end - tokens[i + 1].start;
-			assert( count < 32 );
-			const char* s = data + tokens[i + 1].start;
-			strncpy( buffer, s, count );
-			buffer[count] = 0;
-			int quality = b3ClampInt( (int)strtol( buffer, nullptr, 10 ), 0, 2 );
+			int quality = b3ClampInt( ParseInt( data, tokens[i + 1] ), 0, 2 );
 
 			GtaoTraceParams p = GetGtaoTraceParams();
 			p.quality = (AmbientOcclusionQuality)quality;
@@ -200,41 +233,25 @@ void SampleContext::Load()
 		}
 		else if ( jsoneq( data, &tokens[i], "exposure" ) == 0 )
 		{
-			int count = tokens[i + 1].end - tokens[i + 1].start;
-			assert( count < 32 );
-			const char* s = data + tokens[i + 1].start;
-			strncpy( buffer, s, count );
-			buffer[count] = 0;
-			SetExposure( strtof( buffer, nullptr ) );
+			SetExposure( ParseFloat( data, tokens[i + 1] ) );
 		}
 		else if ( jsoneq( data, &tokens[i], "sunStrength" ) == 0 )
 		{
-			int count = tokens[i + 1].end - tokens[i + 1].start;
-			assert( count < 32 );
-			const char* s = data + tokens[i + 1].start;
-			strncpy( buffer, s, count );
-			buffer[count] = 0;
 			Sun sun = GetSun();
-			sun.strength = strtof( buffer, nullptr );
+			sun.strength = ParseFloat( data, tokens[i + 1] );
 			SetSun( sun );
+		}
+		else if ( jsoneq( data, &tokens[i], "shadowSplitLambda" ) == 0 )
+		{
+			SetShadowSplitLambda( ParseFloat( data, tokens[i + 1] ) );
 		}
 		else if ( jsoneq( data, &tokens[i], "debugView" ) == 0 )
 		{
-			int count = tokens[i + 1].end - tokens[i + 1].start;
-			assert( count < 32 );
-			const char* s = data + tokens[i + 1].start;
-			strncpy( buffer, s, count );
-			buffer[count] = 0;
-			debugView = b3ClampInt( (int)strtol( buffer, nullptr, 10 ), 0, 4 );
+			debugView = b3ClampInt( ParseInt( data, tokens[i + 1] ), 0, 4 );
 		}
 		else if ( jsoneq( data, &tokens[i], "drawDistance" ) == 0 )
 		{
-			int count = tokens[i + 1].end - tokens[i + 1].start;
-			assert( count < 32 );
-			const char* s = data + tokens[i + 1].start;
-			strncpy( buffer, s, count );
-			buffer[count] = 0;
-			drawDistance = b3ClampFloat( strtof( buffer, nullptr ), 1.0f, Camera::kViewDistance );
+			drawDistance = b3ClampFloat( ParseFloat( data, tokens[i + 1] ), 1.0f, Camera::kViewDistance );
 		}
 		else if ( jsoneq( data, &tokens[i], "showHullEdges" ) == 0 )
 		{
@@ -252,27 +269,11 @@ void SampleContext::Load()
 		}
 		else if ( jsoneq( data, &tokens[i], "replayKeyframeBudgetMB" ) == 0 )
 		{
-			int count = tokens[i + 1].end - tokens[i + 1].start;
-			if ( count > (int)sizeof( buffer ) - 1 )
-			{
-				count = (int)sizeof( buffer ) - 1;
-			}
-			const char* s = data + tokens[i + 1].start;
-			memcpy( buffer, s, count );
-			buffer[count] = 0;
-			replayKeyframeBudgetMB = b3ClampInt( (int)strtol( buffer, nullptr, 10 ), 64, 4096 );
+			replayKeyframeBudgetMB = b3ClampInt( ParseInt( data, tokens[i + 1] ), 64, 4096 );
 		}
 		else if ( jsoneq( data, &tokens[i], "replayKeyframeMinInterval" ) == 0 )
 		{
-			int count = tokens[i + 1].end - tokens[i + 1].start;
-			if ( count > (int)sizeof( buffer ) - 1 )
-			{
-				count = (int)sizeof( buffer ) - 1;
-			}
-			const char* s = data + tokens[i + 1].start;
-			memcpy( buffer, s, count );
-			buffer[count] = 0;
-			replayKeyframeMinInterval = b3ClampInt( (int)strtol( buffer, nullptr, 10 ), 1, 1024 );
+			replayKeyframeMinInterval = b3ClampInt( ParseInt( data, tokens[i + 1] ), 1, 1024 );
 		}
 	}
 
@@ -318,6 +319,9 @@ Sample::Sample( SampleContext* context )
 	m_mouseDelta = { 0.0f, 0.0f };
 	m_launchSpeedScale = 5.0f;
 
+	m_shadowSplitNear = 0.0f;
+	m_shadowSplitFar = 0.0f;
+
 	g_randomSeed = RAND_SEED;
 
 	b3Capacity capacity = {};
@@ -356,7 +360,13 @@ void Sample::FinishRecording()
 	}
 
 	b3World_StopRecording( m_worldId );
-	b3SaveRecordingToFile( m_recording, m_context->recordingFile );
+
+	// The buffer is freed either way, so a failed write has to be said out loud
+	if ( b3SaveRecordingToFile( m_recording, m_context->recordingFile ) == false )
+	{
+		fprintf( stderr, "Failed to write recording '%s'\n", m_context->recordingFile );
+	}
+
 	b3DestroyRecording( m_recording );
 	m_recording = nullptr;
 }
@@ -488,10 +498,23 @@ void Sample::Step()
 	// Box3D uses this to decide which shapes enter the draw set and lazily fire
 	// createDebugShape. The camera derives it from the view distance, in length units
 	// around the simulation eye, matching the broad-phase tree and the far plane.
-	debugDraw.drawingBounds = m_camera->DrawBounds();
+	const b3AABB drawBox = m_camera->DrawBounds();
 
-	// Same view box drives compound child culling in the adapter.
-	SetViewBounds( debugDraw.drawingBounds );
+	// A caster between the view and the sun is off screen but still darkens what
+	// is on screen, so the draw set has to reach past the view box. Bounds come
+	// back in the eye-relative frame the view inverse maps into, hence the offset.
+	b3Vec3 casterLo, casterHi;
+	const Mat4 viewInv = m_camera->ViewInverse();
+	const Mat4 projInv = m_camera->ProjInverse();
+	GetShadowCasterBounds( &viewInv, &projInv, &casterLo, &casterHi );
+	const b3AABB casterBox = b3OffsetAABB( { casterLo, casterHi }, m_camera->DrawOrigin() );
+
+	debugDraw.drawingBounds.lowerBound = b3Min( drawBox.lowerBound, casterBox.lowerBound );
+	debugDraw.drawingBounds.upperBound = b3Max( drawBox.upperBound, casterBox.upperBound );
+
+	// Compound child culling keeps the tighter view box. Widening it there would
+	// cull nothing.
+	SetViewBounds( drawBox );
 
 	ApplyGuiFlags( &debugDraw );
 
@@ -577,28 +600,15 @@ void Sample::DrawMetrics()
 
 	float fontSize = ImGui::GetFontSize();
 	float menuWidth = InfoPanelWidthEm() * fontSize;
-	float margin = 0.5f * fontSize;
+	float drawerHeight = 16.0f * fontSize;
 	float drawerWidth = m_camera->m_width - menuWidth - 1.5f * fontSize;
 
-	float minHeight = 8.0f * fontSize;
-	float maxHeight = b3MaxFloat( minHeight, m_camera->m_height - 3.0f * fontSize );
-
-	static float s_drawerHeight = 0.0f;
-	if ( s_drawerHeight < minHeight )
-	{
-		s_drawerHeight = 16.0f * fontSize; // default on first show
-	}
-	s_drawerHeight = b3ClampFloat( s_drawerHeight, minHeight, maxHeight );
-
-	ImGui::SetNextWindowPos( { margin, m_camera->m_height - s_drawerHeight - margin } );
-	ImGui::SetNextWindowSize( { drawerWidth, s_drawerHeight }, ImGuiCond_FirstUseEver );
-	ImGui::SetNextWindowSizeConstraints( { drawerWidth, minHeight }, { drawerWidth, maxHeight } );
+	ImGui::SetNextWindowPos( { 0.5f * fontSize, m_camera->m_height - drawerHeight - 0.5f * fontSize } );
+	ImGui::SetNextWindowSize( { drawerWidth, drawerHeight } );
 
 	ImGui::Begin( "Metrics", nullptr,
-				  ImGuiWindowFlags_NoMove | ImGuiWindowFlags_NoCollapse | ImGuiWindowFlags_NoTitleBar );
-
-	// Remember the height the user dragged to so the bottom stays anchored next frame.
-	s_drawerHeight = b3ClampFloat( ImGui::GetWindowSize().y, minHeight, maxHeight );
+				  ImGuiWindowFlags_NoMove | ImGuiWindowFlags_NoResize | ImGuiWindowFlags_NoCollapse |
+					  ImGuiWindowFlags_NoTitleBar );
 
 	if ( ImGui::BeginTabBar( "MetricsTabs", ImGuiTabBarFlags_None ) == false )
 	{
@@ -611,7 +621,7 @@ void Sample::DrawMetrics()
 		int count = m_profileWriteIndex - m_profileReadIndex;
 
 		// Unroll ring buffer into per-field histories.
-		constexpr int kRowCount = 27;
+		constexpr int kRowCount = 22;
 		float histories[kRowCount][m_profileCapacity];
 		float totals[kRowCount] = {};
 		for ( int i = 0; i < count; ++i )
@@ -640,11 +650,6 @@ void Sample::DrawMetrics()
 			histories[19][i] = p.sleepIslands;
 			histories[20][i] = p.bullets;
 			histories[21][i] = p.sensors;
-			histories[22][i] = p.fracture;
-			histories[23][i] = p.fractureGather;
-			histories[24][i] = p.fractureAnalyze;
-			histories[25][i] = p.fractureSever;
-			histories[26][i] = p.fractureDebris;
 
 			totals[0] += p.step;
 			totals[1] += p.pairs;
@@ -668,11 +673,6 @@ void Sample::DrawMetrics()
 			totals[19] += p.sleepIslands;
 			totals[20] += p.bullets;
 			totals[21] += p.sensors;
-			totals[22] += p.fracture;
-			totals[23] += p.fractureGather;
-			totals[24] += p.fractureAnalyze;
-			totals[25] += p.fractureSever;
-			totals[26] += p.fractureDebris;
 		}
 
 		// Smoothed over the last few frames so bars don't jitter visibly.
@@ -724,7 +724,6 @@ void Sample::DrawMetrics()
 		const ImU32 colorCollide = IM_COL32( 255, 140, 51, 255 );
 		const ImU32 colorSolve = IM_COL32( 102, 204, 102, 255 );
 		const ImU32 colorSensors = IM_COL32( 200, 120, 220, 255 );
-		const ImU32 colorFracture = IM_COL32( 255, 105, 97, 255 );
 		const ImU32 colorOther = IM_COL32( 90, 90, 90, 255 );
 		const ImU32 colorDefault = IM_COL32( 220, 220, 220, 255 );
 
@@ -736,8 +735,7 @@ void Sample::DrawMetrics()
 			{ "restitution", 2, colorDefault }, { "store", 2, colorDefault },		 { "split islands", 2, colorDefault },
 			{ "transforms", 1, colorDefault },	{ "joint events", 1, colorDefault }, { "hit events", 1, colorDefault },
 			{ "refit BVH", 1, colorDefault },	{ "sleep", 1, colorDefault },		 { "bullets", 1, colorDefault },
-			{ "sensors", 0, colorSensors },		{ "fracture", 0, colorFracture },	 { "gather", 1, colorDefault },
-			{ "analysis", 1, colorDefault },	{ "sever", 1, colorDefault },		 { "debris", 1, colorDefault },
+			{ "sensors", 0, colorSensors },
 		};
 
 		// Derive parent/child links from the indent levels so we can collapse subtrees.
@@ -774,37 +772,7 @@ void Sample::DrawMetrics()
 		ImGui::SameLine();
 		ImGui::Checkbox( "Show plots", &s_showPlots );
 		ImGui::SameLine();
-		static bool s_expandAll = false;
-		if ( ImGui::Checkbox( "Expand all", &s_expandAll ) )
-		{
-			for ( int r = 0; r < kRowCount; ++r )
-			{
-				s_rowOpen[r] = s_expandAll;
-			}
-		}
-		ImGui::SameLine();
 		ImGui::Text( "   step %.2f ms", now[0] );
-
-		{
-			b3Counters counters = b3World_GetCounters( m_worldId );
-			ImGui::TextDisabled( "bodies %d   contacts %d (awake %d)   joints %d   islands %d", counters.bodyCount,
-								 counters.contactCount, counters.awakeContactCount, counters.jointCount,
-								 counters.islandCount );
-
-			constexpr int kColorCount = (int)( sizeof( counters.colorCounts ) / sizeof( counters.colorCounts[0] ) );
-			int overflowCount = counters.colorCounts[kColorCount - 1];
-			if ( overflowCount > 0 )
-			{
-				ImGui::SameLine();
-				ImGui::TextColored( ImVec4( 1.0f, 0.55f, 0.2f, 1.0f ), "  overflow %d", overflowCount );
-				if ( ImGui::IsItemHovered() )
-				{
-					ImGui::SetTooltip( "contact/joint constraints in the serial overflow color:\n"
-									   "these cannot be solved in parallel, so 'constraints' stops\n"
-									   "scaling with workers. Reduce contact density (e.g. Max debris)." );
-				}
-			}
-		}
 
 		// Flame strip: step subdivided by top-level children.
 		{
@@ -812,8 +780,7 @@ void Sample::DrawMetrics()
 			float collideT = now[2];
 			float solveT = now[3];
 			float sensorsT = now[21];
-			float fractureT = now[22];
-			float otherT = b3MaxFloat( stepNow - pairsT - collideT - solveT - sensorsT - fractureT, 0.0f );
+			float otherT = b3MaxFloat( stepNow - pairsT - collideT - solveT - sensorsT, 0.0f );
 
 			float availWidth = ImGui::GetContentRegionAvail().x;
 			float barHeight = 1.5f * fontSize;
@@ -825,7 +792,6 @@ void Sample::DrawMetrics()
 			x = AddSegment( dl, availWidth, collideT, stepNow, colorCollide, x, cursor, barHeight );
 			x = AddSegment( dl, availWidth, solveT, stepNow, colorSolve, x, cursor, barHeight );
 			x = AddSegment( dl, availWidth, sensorsT, stepNow, colorSensors, x, cursor, barHeight );
-			x = AddSegment( dl, availWidth, fractureT, stepNow, colorFracture, x, cursor, barHeight );
 			x = AddSegment( dl, availWidth, otherT, stepNow, colorOther, x, cursor, barHeight );
 
 			ImGui::Dummy( ImVec2( availWidth, barHeight ) );
@@ -1390,10 +1356,25 @@ void SelectSample( SampleContext* context, int selection, bool restart )
 	context->restart = restart;
 	context->sample = g_sampleEntries[selection].CreateFcn( context );
 
-	// Fit the shadow cascade range to the world bounds.
-	b3AABB bounds = b3World_GetBounds( context->sample->m_worldId );
-	float diagonal = b3Distance( bounds.lowerBound, bounds.upperBound );
-	SetShadowSplitFar( b3ClampFloat( diagonal, SHADOW_SPLIT_FAR, 200.0f ) );
+	// A sample that knows where its content sits relative to its camera says
+	// so, and is taken at its word. The ceiling below guards a guess, not a
+	// measurement, so capping an explicit request would only hide it.
+	if ( context->sample->m_shadowSplitFar > 0.0f )
+	{
+		// A sample wanting only more reach leaves the near end at zero.
+		float splitNear = context->sample->m_shadowSplitNear;
+		SetShadowSplits( splitNear > 0.0f ? splitNear : SHADOW_SPLIT_NEAR, context->sample->m_shadowSplitFar );
+	}
+	else
+	{
+		// Otherwise fit the range to the world bounds. The bounds are a poor
+		// proxy for how far shadows need to reach: a ground plate stretches
+		// the diagonal well past anything worth shadowing, so the ceiling
+		// matters more than the estimate.
+		b3AABB bounds = b3World_GetBounds( context->sample->m_worldId );
+		float diagonal = b3Distance( bounds.lowerBound, bounds.upperBound );
+		SetShadowSplits( SHADOW_SPLIT_NEAR, b3ClampFloat( diagonal, SHADOW_SPLIT_FAR, SHADOW_SPLIT_FAR_MAX ) );
+	}
 
 	// Samples read restart only while constructing, to keep the camera across a
 	// restart. Clear it so a later switch starts fresh.
@@ -1407,13 +1388,20 @@ void OpenReplayFileDialog( SampleContext* context )
 		return;
 	}
 
-	NFD_Init();
+	if ( NFD_Init() != NFD_OKAY )
+	{
+		return;
+	}
+
 	nfdu8char_t* outPath = nullptr;
 	nfdu8filteritem_t filter[1] = { { "Box3D recording", "b3rec" } };
 
-	// Start in the working directory, where recordings are saved by default.
-	std::u8string cwd = std::filesystem::current_path().u8string();
-	const nfdu8char_t* defaultPath = reinterpret_cast<const nfdu8char_t*>( cwd.c_str() );
+	// Start in the working directory, where recordings are saved by default. A
+	// deleted or unreadable working directory just means no starting point.
+	std::error_code ec;
+	std::u8string cwd = std::filesystem::current_path( ec ).u8string();
+	const nfdu8char_t* defaultPath = ec ? nullptr : reinterpret_cast<const nfdu8char_t*>( cwd.c_str() );
+
 	if ( NFD_OpenDialogU8( &outPath, filter, 1, defaultPath ) == NFD_OKAY )
 	{
 		snprintf( context->replayFile, sizeof( context->replayFile ), "%s", outPath );
@@ -1550,6 +1538,61 @@ static void DrawRenderMenu( SampleContext& ctx )
 {
 	ImGui::MenuItem( "Shadows", nullptr, &ctx.enableShadows );
 
+	if ( ImGui::BeginMenu( "Cascades" ) )
+	{
+		ImGui::PushItemWidth( 8.0f * ImGui::GetFontSize() );
+
+		// Where the split distribution starts, not where shadows start. Raising
+		// it hands the whole working volume to the first cascade and coarsens
+		// it to suit. The c0 row below is what to steer by: it says how far the
+		// sharp cascade reaches and what one of its texels costs.
+		float splitNear = GetShadowSplitNear();
+		if ( ImGui::SliderFloat( "Start", &splitNear, 0.1f, 30.0f, "%.1f m" ) )
+		{
+			SetShadowSplits( splitNear, GetShadowSplitFar() );
+		}
+
+		// Selecting a sample refits the range to the world, so a value dialed
+		// in here survives only until the next sample switch.
+		float splitFar = GetShadowSplitFar();
+		if ( ImGui::SliderFloat( "Range", &splitFar, 10.0f, 200.0f, "%.0f m" ) )
+		{
+			SetShadowSplitFar( splitFar );
+		}
+
+		float lambda = GetShadowSplitLambda();
+		if ( ImGui::SliderFloat( "Distribution", &lambda, 0.0f, 1.0f, "%.2f" ) )
+		{
+			SetShadowSplitLambda( lambda );
+		}
+
+		ImGui::PopItemWidth();
+
+		// Where each cascade ends and how much world one of its texels covers.
+		// A quality cliff at a boundary is the step between two neighboring
+		// texel sizes, which is easier to read here than off the image.
+		if ( ImGui::BeginTable( "cascades", 3, ImGuiTableFlags_SizingFixedFit ) )
+		{
+			ImGui::TableSetupColumn( "csm" );
+			ImGui::TableSetupColumn( "far" );
+			ImGui::TableSetupColumn( "texel" );
+			ImGui::TableHeadersRow();
+			for ( int i = 0; i < SHADOW_CASCADE_COUNT; ++i )
+			{
+				ImGui::TableNextRow();
+				ImGui::TableSetColumnIndex( 0 );
+				ImGui::Text( "%d", i );
+				ImGui::TableSetColumnIndex( 1 );
+				ImGui::Text( "%.1f m", GetCascadeFarViewZ( i ) );
+				ImGui::TableSetColumnIndex( 2 );
+				ImGui::Text( "%.0f mm", 1000.0f * GetCascadeTexelWorld( i ) );
+			}
+			ImGui::EndTable();
+		}
+
+		ImGui::EndMenu();
+	}
+
 	if ( ImGui::BeginMenu( "GTAO" ) )
 	{
 		ImGui::MenuItem( "Enable", nullptr, &ctx.enableGtao );
@@ -1626,7 +1669,7 @@ static void DrawMenuBar( SampleContext* context )
 		if ( ImGui::BeginMenu( "Sim" ) )
 		{
 			ImGui::MenuItem( "Pause", "P", &context->pause );
-			if ( ImGui::MenuItem( "Single Step", "O" ) )
+			if ( ImGui::MenuItem( "Single Step", "." ) )
 			{
 				context->singleStep += 1;
 			}
@@ -1798,7 +1841,8 @@ static void DrawMenuBar( SampleContext* context )
 					DrawRow( "Tab", "Show / hide UI" );
 					DrawRow( "M", "Show / hide diagnostics" );
 					DrawRow( "P", "Pause / resume" );
-					DrawRow( "O", "Single step (Shift: 5)" );
+					DrawRow( ".", "Single step (Shift: 5)" );
+					DrawRow( ",", "Step back, replay only (Shift: 5)" );
 					DrawRow( "R", "Restart sample" );
 					DrawRow( "[  ]", "Previous / next sample" );
 					DrawRow( "Ctrl+O", "Open sample picker" );
@@ -1817,7 +1861,7 @@ static void DrawMenuBar( SampleContext* context )
 					DrawRow( "Alt + left drag", "Orbit camera" );
 					DrawRow( "Alt + middle drag", "Pan camera" );
 					DrawRow( "Alt + right drag", "Zoom (dolly)" );
-					DrawRow( "Right drag", "Fly look (WASD to move)" );
+					DrawRow( "Right drag", "Fly look (WASD, Q / E to move)" );
 					DrawRow( "Scroll", "Zoom" );
 					DrawRow( "Shift + left", "Shoot (Ctrl spin, Alt ragdoll)" );
 					ImGui::EndTable();

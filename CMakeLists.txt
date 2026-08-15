@@ -76,13 +76,29 @@ endif()
 
 # Deterministic math
 # https://box2d.org/posts/2024/08/determinism/
-if (MINGW OR APPLE OR UNIX)
-	add_compile_options(-ffp-contract=off)
+# Contraction into FMA is the one value changing transform enabled by default, and whether
+# it fires depends on the target. Test the compiler, not the platform, so every gcc and
+# clang gets the flag including a clang that is neither MinGW nor clang-cl.
+if (CMAKE_C_COMPILER_ID MATCHES "GNU|Clang")
+	if (CMAKE_C_COMPILER_FRONTEND_VARIANT STREQUAL "MSVC")
+		# clang-cl defaults to contraction on and silently drops the GNU spelling
+		add_compile_options(/clang:-ffp-contract=off)
+	else()
+		add_compile_options(-ffp-contract=off)
+	endif()
 endif()
 
 option(BOX3D_DISABLE_SIMD "Disable SIMD math (slower)" OFF)
 option(BOX3D_COMPILE_WARNING_AS_ERROR "Compile warnings as errors" OFF)
 option(BOX3D_DOUBLE_PRECISION "Enable double precision for large worlds" OFF)
+
+# These are read by the library build, so they must precede add_subdirectory(src),
+# otherwise the first configure and a re-configure produce different libraries.
+# Top level only, so they stay hidden from FetchContent consumers.
+if(PROJECT_IS_TOP_LEVEL)
+	option(BOX3D_PROFILE "Enable profiling with Tracy" OFF)
+	option(BOX3D_VALIDATE "Enable heavy validation" ON)
+endif()
 
 # Emscripten maps the SSE2 path onto wasm SIMD128. simd.h is a header included by
 # non-library targets like the tests, so these flags must be directory-wide, not
@@ -127,8 +143,6 @@ if(PROJECT_IS_TOP_LEVEL)
 	option(BOX3D_SAMPLES "Build the Box3D samples" ON)
 	option(BOX3D_BENCHMARKS "Build the Box3D benchmarks" OFF)
 	option(BOX3D_DOCS "Build the Box3D documentation" OFF)
-	option(BOX3D_PROFILE "Enable profiling with Tracy" OFF)
-	option(BOX3D_VALIDATE "Enable heavy validation" ON)
 	option(BOX3D_UNIT_TESTS "Build the Box3D unit tests" ON)
 
 	# Enable this for shader development using sokol-shdc.

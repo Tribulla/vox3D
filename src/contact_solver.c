@@ -156,8 +156,7 @@ void b3PrepareContacts_Mesh( b3SolverBlock block, b3StepContext* context )
 			contactConstraint->invMassA = mA;
 			contactConstraint->invIB = iB;
 			contactConstraint->invMassB = mB;
-			contactConstraint->rollingMass =
-				contact->rollingResistance > 0.0f ? b3InvertMatrix( b3AddMM( iA, iB ) ) : b3Mat3_zero;
+			contactConstraint->rollingMass = b3InvertMatrix( b3AddMM( iA, iB ) );
 			contactConstraint->softness =
 				( contact->flags & b3_contactStaticFlag ) != 0 ? context->staticSoftness : context->contactSoftness;
 			contactConstraint->friction = contact->friction;
@@ -1559,7 +1558,7 @@ void b3WarmStartContacts_Convex( b3SolverBlock block, b3StepContext* context )
 		int pointCount1 = b3MaxInt( c->pointCounts[0], c->pointCounts[1] );
 		int pointCount2 = b3MaxInt( c->pointCounts[2], c->pointCounts[3] );
 		int pointCount = b3MaxInt( pointCount1, pointCount2 );
-		B3_VALIDATE( 0 < pointCount && pointCount <= B3_SIMD_WIDTH );
+		B3_VALIDATE( 0 < pointCount && pointCount <= B3_MAX_MANIFOLD_POINTS );
 
 		// Normal impulses
 		for ( int j = 0; j < pointCount; ++j )
@@ -1633,7 +1632,7 @@ void b3SolveContacts_Convex( b3SolverBlock block, b3StepContext* context, bool u
 		int pointCount1 = b3MaxInt( c->pointCounts[0], c->pointCounts[1] );
 		int pointCount2 = b3MaxInt( c->pointCounts[2], c->pointCounts[3] );
 		int pointCount = b3MaxInt( pointCount1, pointCount2 );
-		B3_VALIDATE( 0 < pointCount && pointCount <= B3_SIMD_WIDTH );
+		B3_VALIDATE( 0 < pointCount && pointCount <= B3_MAX_MANIFOLD_POINTS );
 
 		b3BodyStateW bA = b3GatherBodies( states, c->indexA );
 		b3BodyStateW bB = b3GatherBodies( states, c->indexB );
@@ -1848,7 +1847,7 @@ void b3ApplyRestitution_Convex( b3SolverBlock block, b3StepContext* context )
 		int pointCount1 = b3MaxInt( c->pointCounts[0], c->pointCounts[1] );
 		int pointCount2 = b3MaxInt( c->pointCounts[2], c->pointCounts[3] );
 		int pointCount = b3MaxInt( pointCount1, pointCount2 );
-		B3_VALIDATE( 0 < pointCount && pointCount <= B3_SIMD_WIDTH );
+		B3_VALIDATE( 0 < pointCount && pointCount <= B3_MAX_MANIFOLD_POINTS );
 
 		// Single gather for all manifolds
 		b3BodyStateW bA = b3GatherBodies( states, c->indexA );

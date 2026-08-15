@@ -5,11 +5,9 @@
 
 #include "base.h"
 #include "collision.h"
-#include "fracture.h"
 #include "id.h"
 #include "math_functions.h"
 #include "types.h"
-#include "voxel.h"
 
 #include <stdbool.h>
 
@@ -325,10 +323,10 @@ typedef struct b3RecPlayerInfo
 /// Replaying at a different count re-partitions the constraint graph, so the StateHash check
 /// becomes a cross-thread determinism test. Adjustable later with b3RecPlayer_SetWorkerCount.
 /// @return a new player, or NULL on bad header or deserialization failure
-B3_API b3RecPlayer* b3RecPlayer_Create( const void* data, int size, int workerCount );
+B3_API b3RecPlayer* b3CreatePlayer( const void* data, int size, int workerCount );
 
 /// Destroy the player and free all memory. Restores the previous global length scale.
-B3_API void b3RecPlayer_Destroy( b3RecPlayer* player );
+B3_API void b3DestroyPlayer( b3RecPlayer* player );
 
 /// Advance one frame. dispatch ops until the next Step completes.
 /// @return true when a frame was stepped, false at end-of-recording
@@ -829,8 +827,6 @@ B3_API b3ShapeId b3CreateMeshShape( b3BodyId bodyId, const b3ShapeDef* def, cons
 /// @warning this holds reference to the input height field which must remain valid for the lifetime of this shape
 /// @return the shape id for accessing the shape
 B3_API b3ShapeId b3CreateHeightFieldShape( b3BodyId bodyId, const b3ShapeDef* def, const b3HeightFieldData* heightField );
-
-B3_API b3ShapeId b3CreateVoxelShape( b3BodyId bodyId, const b3ShapeDef* def, const b3VoxelData* voxels );
 
 /// Baked compound shapes are only allowed on static bodies.
 /// Note: runtime compounds are achieved by adding multiple shapes to a body.

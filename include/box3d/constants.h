@@ -41,7 +41,7 @@ B3_API float b3GetStallThreshold( void );
 // Maximum number of colors in the constraint graph. Constraints that cannot
 // find a color are added to the overflow set which are solved single-threaded.
 // The compound barrel benchmark has minor overflow with 24 colors
-#define B3_GRAPH_COLOR_COUNT 48
+#define B3_GRAPH_COLOR_COUNT 24
 
 // Number of contact point buckets for counting the number of contact points per
 // shape contact pair. This is just for reporting and doesn't affect simulation.
@@ -106,9 +106,6 @@ B3_API float b3GetStallThreshold( void );
 /// The maximum number of contact points between two touching shapes.
 #define B3_MAX_MANIFOLD_POINTS 4
 
-/// The maximum number points to use for shape cast proxies (swept point cloud).
-#define B3_MAX_SHAPE_CAST_POINTS 64
-
 /// The number of iterations for gyroscopic torques.
 #ifndef B3_GYROSCOPIC_ITERATIONS
 #define B3_GYROSCOPIC_ITERATIONS 1
@@ -126,8 +123,17 @@ B3_API float b3GetStallThreshold( void );
 /// Relative tolerance used to determine if two edges are parallel.
 #define B3_PARALLEL_EDGE_TOL 0.005f
 
+/// The maximum number points to use for shape cast proxies (swept point cloud).
+#define B3_MAX_SHAPE_CAST_POINTS B3_MAX_HULL_VERTICES
+
 /// These generous limits allow for easy hashing. See b3ShapePairKey.
 #define B3_SHAPE_POWER 22
 #define B3_CHILD_POWER ( 64 - 2 * B3_SHAPE_POWER )
 #define B3_MAX_SHAPES ( 1 << B3_SHAPE_POWER )
 #define B3_MAX_CHILD_SHAPES ( 1 << B3_CHILD_POWER )
+
+/// Increase this if your application needs more accurate restitution. Doing so will
+/// slow down the simulation. Must be 1 or more.
+#ifndef B3_RESTITUTION_ITERATIONS
+#define B3_RESTITUTION_ITERATIONS 1
+#endif

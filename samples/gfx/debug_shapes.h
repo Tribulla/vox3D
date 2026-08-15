@@ -34,8 +34,6 @@ extern "C"
 // each Acquire with a single ReleaseMeshReference when the consumer goes away.
 MeshHandle FindOrAddHull( const b3HullData* hull );
 
-MeshHandle FindOrAddUnitBox( void );
-
 // Acquire for b3MeshData. The b3Mesh struct's per-instance `scale` is NOT
 // part of the geometry, callers pass it as the per-instance scale at
 // draw time. Two b3Mesh sharing the same b3MeshData share one entry.

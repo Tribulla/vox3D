@@ -351,6 +351,34 @@ b3Joint* b3GetJointFullId( b3World* world, b3JointId jointId );
 b3JointSim* b3GetJointSim( b3World* world, b3Joint* joint );
 b3JointSim* b3GetJointSimCheckType( b3JointId jointId, b3JointType type );
 
+// Equality rows (weld, point-to-point, hinge collinearity, prismatic
+// orientation) are solved by b3SolveJoints_Direct. Sequential impulse is
+// skipped entirely when that is the whole joint.
+static inline bool b3JointDirectFullyOwned( const b3JointSim* joint )
+{
+	switch ( joint->type )
+	{
+		case b3_weldJoint:
+			return joint->weldJoint.linearHertz == 0.0f && joint->weldJoint.angularHertz == 0.0f;
+		case b3_sphericalJoint:
+			return joint->sphericalJoint.enableSpring == false && joint->sphericalJoint.enableMotor == false &&
+				   joint->sphericalJoint.enableConeLimit == false && joint->sphericalJoint.enableTwistLimit == false;
+		case b3_revoluteJoint:
+			return joint->revoluteJoint.enableSpring == false && joint->revoluteJoint.enableMotor == false &&
+				   joint->revoluteJoint.enableLimit == false;
+		case b3_prismaticJoint:
+			return joint->prismaticJoint.enableSpring == false && joint->prismaticJoint.enableMotor == false &&
+				   joint->prismaticJoint.enableLimit == false;
+		case b3_distanceJoint:
+		{
+			const b3DistanceJoint* d = &joint->distanceJoint;
+			return ( d->enableSpring && ( d->minLength < d->maxLength || d->enableLimit == false ) ) == false;
+		}
+		default:
+			return false;
+	}
+}
+
 void b3PrepareJoint( b3JointSim* joint, b3StepContext* context );
 void b3WarmStartJoint( b3JointSim* joint, b3StepContext* context );
 void b3SolveJoint( b3JointSim* joint, b3StepContext* context, bool useBias );

@@ -11,8 +11,7 @@
 #include "contact.h"
 #include "core.h"
 #include "ctz.h"
-#include "fracture.h"
-#include "hull_map.h"
+#include "hull.h"
 #include "island.h"
 #include "joint.h"
 #include "parallel_for.h"
@@ -37,37 +36,26 @@ _Static_assert( B3_MAX_WORLDS < UINT16_MAX, "B3_MAX_WORLDS limit exceeded" );
 b3World b3_worlds[B3_MAX_WORLDS];
 b3AtomicInt b3_worldCount;
 int b3_maxWorldCount;
-static b3AtomicInt b3_worldRegistryLock;
-
-static void b3LockWorldRegistry( void )
-{
-	while ( b3AtomicCompareExchangeInt( &b3_worldRegistryLock, 0, 1 ) == false )
-	{
-		b3Yield();
-	}
-}
-
-static void b3UnlockWorldRegistry( void )
-{
-	b3AtomicStoreInt( &b3_worldRegistryLock, 0 );
-}
 
 const b3HullData* b3AddHullToDatabase( b3World* world, const b3HullData* src )
 {
 	b3HullMap* database = world->hullDatabase;
 
-	// Compare by content so an unowned query hull finds the shared copy.
+	// Compare by content to de-duplicate. Not trusting the hash.
 	b3HullMap_itr itr = b3HullMap_get( database, src );
 	if ( b3HullMap_is_end( itr ) == false )
 	{
+		// Bump reference count.
 		itr.data->val += 1;
 		return itr.data->key;
 	}
 
-	b3HullData* owned = b3CloneHull( src );
-	B3_ASSERT( owned != NULL );
-	b3HullMap_insert( database, owned, 1 );
-	return owned;
+	b3HullData* clone = b3CloneHull( src );
+	B3_ASSERT( clone != NULL );
+
+	// Start with reference count of 1.
+	b3HullMap_insert( database, clone, 1 );
+	return clone;
 }
 
 const b3HullData* b3AddOwnedHullToDatabase( b3World* world, b3HullData* owned )
@@ -225,10 +213,6 @@ b3WorldId b3CreateWorld( const b3WorldDef* def )
 	B3_ASSERT( B3_LINEAR_SLOP <= B3_MESH_REST_OFFSET );
 	B3_ASSERT( B3_MESH_REST_OFFSET < B3_SPECULATIVE_DISTANCE );
 
-	// Physics islands may create worlds concurrently. Reserve the global slot before
-	// initializing it so two creators cannot both memset and populate the same world.
-	b3LockWorldRegistry();
-
 	int worldId = B3_NULL_INDEX;
 	for ( int i = 0; i < B3_MAX_WORLDS; ++i )
 	{
@@ -243,7 +227,6 @@ b3WorldId b3CreateWorld( const b3WorldDef* def )
 	{
 		b3Log( "B3_MAX_WORLDS of %d exceeded!!!", B3_MAX_WORLDS );
 		B3_ASSERT( worldId != B3_NULL_INDEX );
-		b3UnlockWorldRegistry();
 		return (b3WorldId){ 0 };
 	}
 
@@ -264,7 +247,6 @@ b3WorldId b3CreateWorld( const b3WorldDef* def )
 	world->worldId = (uint16_t)worldId;
 	world->generation = revision;
 	world->inUse = true;
-	b3UnlockWorldRegistry();
 
 	world->stack = b3CreateStack( 2048 );
 
@@ -419,6 +401,8 @@ b3WorldId b3CreateWorld( const b3WorldDef* def )
 
 void b3DestroyWorld( b3WorldId worldId )
 {
+	b3AtomicFetchAddInt( &b3_worldCount, -1 );
+
 	b3World* world = b3GetUnlockedWorldFromId( worldId );
 	if ( world == NULL )
 	{
@@ -426,8 +410,6 @@ void b3DestroyWorld( b3WorldId worldId )
 	}
 
 	world->locked = true;
-
-	b3FractureWorld_Destroy( world );
 
 	// Detach any recording before teardown. The user owns and frees the recording buffer.
 	b3StopRecordingInternal( world );
@@ -543,15 +525,10 @@ void b3DestroyWorld( b3WorldId worldId )
 
 	b3DestroyStack( &world->stack );
 
-	b3LockWorldRegistry();
-
 	// Wipe world but preserve generation
 	uint16_t generation = world->generation;
 	memset( world, 0, sizeof( b3World ) );
 	world->generation = generation + 1;
-	b3AtomicFetchAddInt( &b3_worldCount, -1 );
-
-	b3UnlockWorldRegistry();
 
 	// b3Log( "Destroyed world %d", worldId.index1 - 1 );
 }
@@ -563,10 +540,7 @@ int b3GetWorldCount( void )
 
 int b3GetMaxWorldCount( void )
 {
-	b3LockWorldRegistry();
-	int maxWorldCount = b3_maxWorldCount;
-	b3UnlockWorldRegistry();
-	return maxWorldCount;
+	return b3_maxWorldCount;
 }
 
 // Issues T0 prefetches across the cache lines of a b3Contact (216 B / 4 lines).
@@ -595,8 +569,6 @@ static void b3CollideTask( int startIndex, int endIndex, int workerIndex, void* 
 	b3Body* bodies = world->bodies.data;
 	b3BodySim* awakeSims = world->solverSets.data[b3_awakeSet].bodySims.data;
 	b3BodySim* staticSims = world->solverSets.data[b3_staticSet].bodySims.data;
-	b3BodyState* awakeStates = world->solverSets.data[b3_awakeSet].bodyStates.data;
-	float collideTimeStep = stepContext->dt;
 
 	B3_ASSERT( startIndex < endIndex );
 
@@ -680,35 +652,16 @@ static void b3CollideTask( int startIndex, int endIndex, int workerIndex, void* 
 		contact->bodySimIndexB = isStaticB ? B3_NULL_INDEX : bodyB->localIndex;
 		float recycleTolerance = wasTouching ? recycleDistance : recycleDistanceNonTouching;
 
-		// Expected relative motion over the next step. Voxel manifolds grow their
-		// speculative band by this so contacts exist before an impact: they are built
-		// once per full step, and the fixed band only covers 2 cm of approach. Capped
-		// at the continuous-collision trigger (beyond it CCD owns the problem) and at
-		// half a meter to bound the cell queries.
-		float relMotion = 0.0f;
-		if ( shapeA->type == b3_voxelShape || shapeB->type == b3_voxelShape )
-		{
-			b3Vec3 vA = ( isStaticA == false && bodyA->setIndex == b3_awakeSet ) ? awakeStates[bodyA->localIndex].linearVelocity
-																				 : b3Vec3_zero;
-			b3Vec3 vB = ( isStaticB == false && bodyB->setIndex == b3_awakeSet ) ? awakeStates[bodyB->localIndex].linearVelocity
-																				 : b3Vec3_zero;
-			float cap = 0.5f * ( ( isStaticA ? 0.0f : bodySimA->minExtent ) + ( isStaticB ? 0.0f : bodySimB->minExtent ) );
-			cap = b3MinFloat( cap, 0.5f * b3GetLengthUnitsPerMeter() );
-			// Keep the full band even above the continuous-collision trigger: the
-			// speculative points brake a fast body before it reaches the surface,
-			// which is cheaper than the deep-overlap manifolds it produces otherwise
-			// (measured: dropping the band for CCD-covered pairs doubled collide).
-			relMotion = b3MinFloat( b3Length( b3Sub( vA, vB ) ) * collideTimeStep, cap );
-		}
-
 		// Contact recycling optimization. Please cite this library if you use this optimization.
 		// This is inspired by persistent contact manifolds used in some physics engines, such as PhysX.
 		// However, this allows larger relative motion and has fewer tuning parameters (just one).
-		// A fast-approaching voxel pair skips recycling: the cached manifold was built
-		// with a narrower speculative band than the approach now needs.
-		if ( ( isFast == false || isMeshContact == false ) && recycleDistance > 0.0f && relMotion <= recycleTolerance &&
+		if ( ( isFast == false || isMeshContact == false ) && recycleDistance > 0.0f &&
 			 ( contact->flags & b3_relativeTransformValid ) && ( contact->flags & b3_contactRecycleFlag ) )
 		{
+			// The scalar part of b3InvMulQuat is just the quaternion dot product.
+			// cos(relative_angle/2) = scalar(conj(q1) * q2) = dot(q1, q2)
+			// A small relative angle means this value is close to 1. Need to use abs or square
+			// due to double cover.
 			float angleA = b3DotQuat( transformA.q, contact->cachedRotationA );
 			float angleB = b3DotQuat( transformB.q, contact->cachedRotationB );
 			float angularDistance = b3MinFloat( angleA * angleA, angleB * angleB );
@@ -792,7 +745,7 @@ static void b3CollideTask( int startIndex, int endIndex, int workerIndex, void* 
 
 		// This updates solid contacts
 		bool touching = b3UpdateContact( world, workerIndex, contact, shapeA, bodySimA->localCenter, transformA, shapeB,
-										 bodySimB->localCenter, transformB, isFast, relMotion, taskContext->arena );
+										 bodySimB->localCenter, transformB, isFast, taskContext->arena );
 
 		int bucketIndex = b3MinInt( contact->manifoldCount, B3_CONTACT_MANIFOLD_COUNT_BUCKETS - 1 );
 		if ( bucketIndex > 0 )
@@ -1223,21 +1176,6 @@ void b3World_Step( b3WorldId worldId, float timeStep, int subStepCount )
 	b3Array_Clear( world->contactEndEvents[world->endEventArrayIndex] );
 	world->locked = false;
 
-	world->profile.fracture = 0.0f;
-	world->profile.fractureGather = 0.0f;
-	world->profile.fractureAnalyze = 0.0f;
-	world->profile.fractureSever = 0.0f;
-	world->profile.fractureDebris = 0.0f;
-	if ( world->fractureWorld != NULL && timeStep > 0.0f )
-	{
-		struct b3Recording* rec = world->recording;
-		world->recording = NULL;
-		b3FractureWorld_Step( world, timeStep );
-		world->recording = rec;
-
-		world->profile.step += world->profile.fracture;
-	}
-
 	if ( world->recording != NULL )
 	{
 		uint64_t hash = b3HashWorldState( world );
@@ -1408,10 +1346,6 @@ static bool DrawQueryCallback( int proxyId, uint64_t userData, void* context )
 					debugShape.sphere = &shape->sphere;
 					shape->userShape = world->createDebugShape( &debugShape, world->userDebugShapeContext );
 					break;
-				case b3_voxelShape:
-					debugShape.voxel = shape->voxel;
-					shape->userShape = world->createDebugShape( &debugShape, world->userDebugShapeContext );
-					break;
 				default:
 					B3_ASSERT( false );
 					break;
@@ -1499,21 +1433,23 @@ void b3World_Draw( b3WorldId worldId, b3DebugDraw* draw, uint64_t maskBits )
 				const char* name = b3FindName( &world->names, body->nameId );
 				if ( name != NULL )
 				{
-					draw->DrawStringFcn( p, name, b3_colorOrange, draw->context );
+					draw->DrawStringFcn( p, name, b3_colorWhite, draw->context );
 				}
 			}
 
-			if ( draw->drawMass && body->type == b3_dynamicBody )
+			if ( draw->drawMass )
 			{
-				b3Vec3 offset = { 0.1f, 0.1f, 0.1f };
-
 				b3WorldTransform transform = { bodySim->center, bodySim->transform.q };
 				draw->DrawTransformFcn( transform, draw->context );
-				b3Pos p = b3TransformWorldPoint( transform, offset );
 
-				char buffer[32];
-				snprintf( buffer, 32, "  %.2f", body->mass );
-				draw->DrawStringFcn( p, buffer, b3_colorWhite, draw->context );
+				if (body->type == b3_dynamicBody)
+				{
+					b3Vec3 offset = { 0.05f, 0.05f, 0.05f };
+					b3Pos p = b3TransformWorldPoint( transform, offset );
+					char buffer[32];
+					snprintf( buffer, 32, "%.2f", body->mass );
+					draw->DrawStringFcn( p, buffer, b3_colorWhite, draw->context );
+				}
 			}
 
 			if ( draw->drawSleep )

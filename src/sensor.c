@@ -30,11 +30,6 @@ static bool b3OverlapSensor( b3Shape* sensorShape, b3Transform sensorTransform, 
 {
 	b3ShapeType type = sensorShape->type;
 
-	if ( type == b3_voxelShape || visitorShape->type == b3_voxelShape )
-	{
-		return false;
-	}
-
 	b3ShapeProxy proxy = b3MakeShapeProxy( visitorShape );
 
 	// Get the visitor shape in the frame of the sensor
@@ -112,9 +107,8 @@ static bool b3SensorQueryCallback( int proxyId, uint64_t userData, void* context
 	b3World* world = queryContext->world;
 	b3Shape* otherShape = b3Array_Get( world->shapes, shapeId );
 
-	// Mesh vs mesh is not supported
-	if ( ( otherShape->type == b3_meshShape || otherShape->type == b3_heightShape ) &&
-		 ( sensorShape->type == b3_meshShape || sensorShape->type == b3_heightShape ) )
+	// Visitors must be convex.
+	if ( b3IsConvex( otherShape->type ) == false )
 	{
 		return true;
 	}
