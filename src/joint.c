@@ -1510,6 +1510,11 @@ void b3PrepareJoint( b3JointSim* joint, b3StepContext* context )
 
 void b3WarmStartJoint( b3JointSim* joint, b3StepContext* context )
 {
+	if ( b3JointDirectFullyOwned( joint ) )
+	{
+		return;
+	}
+
 	switch ( joint->type )
 	{
 		case b3_parallelJoint:
@@ -1554,7 +1559,10 @@ void b3WarmStartJoint( b3JointSim* joint, b3StepContext* context )
 
 void b3SolveJoint( b3JointSim* joint, b3StepContext* context, bool useBias )
 {
-	B3_UNUSED( useBias );
+	if ( b3JointDirectFullyOwned( joint ) )
+	{
+		return;
+	}
 
 	switch ( joint->type )
 	{
