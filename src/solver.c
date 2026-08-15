@@ -13,6 +13,7 @@
 #include "ctz.h"
 #include "island.h"
 #include "joint.h"
+#include "joint_solver.h"
 #include "parallel_for.h"
 #include "physics_world.h"
 #include "platform.h"
@@ -310,6 +311,42 @@ static void b3SolveJointsTask( b3SolverBlock block, b3StepContext* context, bool
 	}
 
 	b3TracyCZoneEnd( solve_joints );
+}
+
+// Sequential impulse skips fully-owned equalities, so reaction events for those
+// joints (and mixed joints whose point-to-point impulse is filled by Direct)
+// must be sampled after the island solve.
+static void b3FlagJointEventsAfterDirect( b3StepContext* context )
+{
+	b3World* world = context->world;
+	if ( world->taskContexts.count == 0 )
+	{
+		return;
+	}
+
+	b3BitSet* jointStateBitSet = &world->taskContexts.data[0].jointStateBitSet;
+	b3ConstraintGraph* graph = context->graph;
+
+	for ( int colorIndex = 0; colorIndex < B3_GRAPH_COLOR_COUNT; ++colorIndex )
+	{
+		b3GraphColor* color = graph->colors + colorIndex;
+		int count = color->jointSims.count;
+		b3JointSim* joints = color->jointSims.data;
+		for ( int i = 0; i < count; ++i )
+		{
+			b3JointSim* joint = joints + i;
+			if ( ( joint->forceThreshold < FLT_MAX || joint->torqueThreshold < FLT_MAX ) &&
+				 b3GetBit( jointStateBitSet, joint->jointId ) == false )
+			{
+				float force, torque;
+				b3GetJointReaction( world, joint, context->inv_h, &force, &torque );
+				if ( force >= joint->forceThreshold || torque >= joint->torqueThreshold )
+				{
+					b3SetBit( jointStateBitSet, joint->jointId );
+				}
+			}
+		}
+	}
 }
 
 #define B2_MAX_CONTINUOUS_SENSOR_HITS 8
@@ -692,17 +729,23 @@ static void b3FinalizeBodiesTask( int startIndex, int endIndex, int workerIndex,
 
 		b3Vec3 v = state->linearVelocity;
 		b3Vec3 w = state->angularVelocity;
-		b3Vec3 localOmega = b3InvRotateVector( sim->transform.q, w );
-		b3Vec3 localDeltaRotation = b3InvRotateVector( sim->transform.q, state->deltaRotation.v );
+		bool unstable = ( b3IsValidVec3( v ) == false || b3IsValidVec3( w ) == false );
 
-		if ( b3IsValidVec3( v ) == false || b3IsValidVec3( w ) == false )
+		if ( unstable )
 		{
 			const char* name = b3FindNameWithDefault( &world->names, bodies[sim->bodyId].nameId, "NULL" );
 			b3Log( "unstable: %s", name );
+
+			v = b3Vec3_zero;
+			w = b3Vec3_zero;
+			state->linearVelocity = v;
+			state->angularVelocity = w;
+			state->deltaPosition = b3Vec3_zero;
+			state->deltaRotation = b3Quat_identity;
 		}
 
-		B3_ASSERT( b3IsValidVec3( v ) );
-		B3_ASSERT( b3IsValidVec3( w ) );
+		b3Vec3 localOmega = b3InvRotateVector( sim->transform.q, w );
+		b3Vec3 localDeltaRotation = b3InvRotateVector( sim->transform.q, state->deltaRotation.v );
 
 		sim->center = b3OffsetPos( sim->center, state->deltaPosition );
 		sim->transform.q = b3NormalizeQuat( b3MulQuat( state->deltaRotation, sim->transform.q ) );
@@ -720,6 +763,10 @@ static void b3FinalizeBodiesTask( int startIndex, int endIndex, int workerIndex,
 		// Position correction is not as important for sleep as true velocity.
 		float positionSleepFactor = 0.5f;
 		float sleepVelocity = b3MaxFloat( maxVelocity, positionSleepFactor * invTimeStep * maxDeltaPosition );
+		if ( unstable )
+		{
+			sleepVelocity = FLT_MAX;
+		}
 
 		// reset state deltas
 		state->deltaPosition = b3Vec3_zero;
@@ -1281,6 +1328,11 @@ static void b3SolverTask( void* taskContext )
 
 			profile->solveImpulses += b3GetMillisecondsAndReset( &ticks );
 
+			// Joint equalities: island LDL / PCG. Sequential impulse in the mixed
+			// stage only does motors, limits, and springs.
+			b3SolveJoints_Direct( context, true );
+			b3FlagJointEventsAfterDirect( context );
+
 			// Integrate positions
 			B3_ASSERT( stages[iterationStageIndex].type == b3_stageIntegratePositions );
 			syncBits = ( bodySyncIndex << 16 ) | iterationStageIndex;
@@ -1308,6 +1360,8 @@ static void b3SolverTask( void* taskContext )
 			}
 
 			profile->relaxImpulses += b3GetMillisecondsAndReset( &ticks );
+
+			b3SolveJoints_Direct( context, false );
 		}
 
 		// Advance the stage according to the sub-stepping tasks just completed

@@ -1510,6 +1510,14 @@ void b3PrepareJoint( b3JointSim* joint, b3StepContext* context )
 
 void b3WarmStartJoint( b3JointSim* joint, b3StepContext* context )
 {
+	// Direct owns these equalities and solves them from the current velocity.
+	// Re-applying last step's impulse with a new Jacobian on long thin bodies
+	// is what turns a rigid weld chain into an explosion.
+	if ( b3JointDirectFullyOwned( joint ) )
+	{
+		return;
+	}
+
 	switch ( joint->type )
 	{
 		case b3_parallelJoint:
@@ -1554,7 +1562,10 @@ void b3WarmStartJoint( b3JointSim* joint, b3StepContext* context )
 
 void b3SolveJoint( b3JointSim* joint, b3StepContext* context, bool useBias )
 {
-	B3_UNUSED( useBias );
+	if ( b3JointDirectFullyOwned( joint ) )
+	{
+		return;
+	}
 
 	switch ( joint->type )
 	{
