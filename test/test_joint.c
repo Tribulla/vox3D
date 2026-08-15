@@ -1216,7 +1216,7 @@ static int TestWeldPullApartRecovery( void )
 	float startSep = b3Joint_GetLinearSeparation( jointId );
 	ENSURE( startSep > 1.5f );
 
-	for ( int i = 0; i < 15; ++i )
+	for ( int i = 0; i < 4; ++i )
 	{
 		b3World_Step( worldId, 1.0f / 60.0f, 4 );
 	}
@@ -1225,14 +1225,14 @@ static int TestWeldPullApartRecovery( void )
 	b3Pos pB = b3Body_GetPosition( bodyB );
 	float sep = b3Joint_GetLinearSeparation( jointId );
 
-	if ( pA.x <= 0.05f || pB.x >= 2.95f || sep >= 0.25f )
+	if ( pA.x <= 0.05f || pB.x >= 2.95f || sep >= 0.15f )
 	{
 		printf( "  pull-apart pA.x=%g pB.x=%g sep=%g\n", pA.x, pB.x, sep );
 	}
 
 	ENSURE( pA.x > 0.05f );
 	ENSURE( pB.x < 2.95f );
-	ENSURE( sep < 0.25f );
+	ENSURE( sep < 0.15f );
 
 	b3DestroyWorld( worldId );
 	return 0;
@@ -1295,7 +1295,7 @@ static int TestWeldPullMiddleLink( void )
 	ENSURE( b3Joint_GetLinearSeparation( chainIds[1] ) > 1.5f );
 	ENSURE( b3Joint_GetLinearSeparation( chainIds[2] ) > 1.5f );
 
-	for ( int i = 0; i < 12; ++i )
+	for ( int i = 0; i < 4; ++i )
 	{
 		b3World_Step( worldId, 1.0f / 60.0f, 4 );
 	}
@@ -1305,15 +1305,15 @@ static int TestWeldPullMiddleLink( void )
 	float sep12 = b3Joint_GetLinearSeparation( chainIds[1] );
 	float sep23 = b3Joint_GetLinearSeparation( chainIds[2] );
 
-	if ( p1.y <= 0.15f || p3.y <= 0.15f || sep12 >= 0.5f || sep23 >= 0.5f )
+	if ( p1.y <= 0.15f || p3.y <= 0.15f || sep12 >= 0.25f || sep23 >= 0.25f )
 	{
 		printf( "  middle-link p1.y=%g p3.y=%g sep12=%g sep23=%g\n", p1.y, p3.y, sep12, sep23 );
 	}
 
 	ENSURE( p1.y > 0.15f );
 	ENSURE( p3.y > 0.15f );
-	ENSURE( sep12 < 0.5f );
-	ENSURE( sep23 < 0.5f );
+	ENSURE( sep12 < 0.25f );
+	ENSURE( sep23 < 0.25f );
 
 	b3DestroyWorld( worldId );
 	return 0;

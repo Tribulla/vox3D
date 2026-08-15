@@ -21,29 +21,13 @@
 #define B3_JOINT_BAUMGARTE_SNAP 1.0f
 #define B3_JOINT_MAX_LINEAR_BIAS 2.0f
 #define B3_JOINT_MAX_ANGULAR_BIAS 2.0f
-#define B3_JOINT_SNAP_LINEAR 0.25f
-#define B3_JOINT_SNAP_ANGULAR 0.25f
 #define B3_JOINT_MAX_LINEAR_BIAS_SNAP 80.0f
-#define B3_JOINT_MAX_ANGULAR_BIAS_SNAP 40.0f
+#define B3_JOINT_MAX_ANGULAR_BIAS_SNAP 20.0f
+#define B3_JOINT_SNAP_LINEAR 0.25f
+#define B3_JOINT_SNAP_ANGULAR 0.5f
 #define B3_JOINT_LINEAR_SLOP 0.0005f
 #define B3_JOINT_ANGULAR_SLOP 0.001f
-#define B3_JOINT_MAX_SPEED 80.0f
-
-static float b3ClampJointBias( float bias, float limit )
-{
-	return b3ClampFloat( bias, -limit, limit );
-}
-
-static b3Vec3 b3ClampJointBiasVec( b3Vec3 bias, float limit )
-{
-	float length = b3Length( bias );
-	if ( length > limit && length > 0.0f )
-	{
-		return b3MulSV( limit / length, bias );
-	}
-
-	return bias;
-}
+#define B3_JOINT_MAX_SPEED 200.0f
 
 typedef struct b3PairOrd
 {
@@ -92,6 +76,7 @@ typedef struct b3JointRow
 	b3Matrix3 invIA;
 	b3Matrix3 invIB;
 	float rhs;
+	float posErr;
 	float cfmRel;
 	float* lambda;
 } b3JointRow;
@@ -158,12 +143,13 @@ static void b3EmitPointToPoint( b3JointRow* rows, int* count, int capacity, b3Jo
 						 b3Add( stateA->linearVelocity, b3Cross( stateA->angularVelocity, rA ) ) );
 
 	b3Vec3 bias = b3Vec3_zero;
+	b3Vec3 separation = b3Vec3_zero;
 	if ( useBias )
 	{
-		b3Vec3 separation = b3Add( b3Add( b3Sub( stateB->deltaPosition, stateA->deltaPosition ), b3Sub( rB, rA ) ), deltaCenter );
-		if ( b3LengthSquared( separation ) > B3_JOINT_LINEAR_SLOP * B3_JOINT_LINEAR_SLOP )
+		separation = b3Add( b3Add( b3Sub( stateB->deltaPosition, stateA->deltaPosition ), b3Sub( rB, rA ) ), deltaCenter );
+		float err2 = b3LengthSquared( separation );
+		if ( err2 > B3_JOINT_LINEAR_SLOP * B3_JOINT_LINEAR_SLOP )
 		{
-			float err2 = b3LengthSquared( separation );
 			float beta = B3_JOINT_BAUMGARTE;
 			float cap = B3_JOINT_MAX_LINEAR_BIAS;
 			if ( err2 > B3_JOINT_SNAP_LINEAR * B3_JOINT_SNAP_LINEAR )
@@ -171,7 +157,13 @@ static void b3EmitPointToPoint( b3JointRow* rows, int* count, int capacity, b3Jo
 				beta = B3_JOINT_BAUMGARTE_SNAP;
 				cap = B3_JOINT_MAX_LINEAR_BIAS_SNAP;
 			}
-			bias = b3ClampJointBiasVec( b3MulSV( beta * context->inv_h, separation ), cap );
+			b3Vec3 raw = b3MulSV( beta * context->inv_h, separation );
+			float length = b3Length( raw );
+			if ( length > cap && length > 0.0f )
+			{
+				raw = b3MulSV( cap / length, raw );
+			}
+			bias = raw;
 		}
 	}
 
@@ -189,6 +181,7 @@ static void b3EmitPointToPoint( b3JointRow* rows, int* count, int capacity, b3Jo
 		row->jAngB = b3Cross( rB, axes[k] );
 		b3FillRowMass( row, base );
 		row->rhs = b3GetByIndex( cdot, k ) + b3GetByIndex( bias, k );
+		row->posErr = b3GetByIndex( separation, k );
 		row->lambda = lambda[k];
 	}
 }
@@ -202,17 +195,21 @@ static void b3EmitAngularEqual( b3JointRow* rows, int* count, int capacity, b3Jo
 
 	b3Vec3 cdot = b3Sub( stateB->angularVelocity, stateA->angularVelocity );
 	b3Vec3 bias = b3Vec3_zero;
-	if ( useBias && b3LengthSquared( angularError ) > B3_JOINT_ANGULAR_SLOP * B3_JOINT_ANGULAR_SLOP )
+	if ( useBias )
 	{
 		float err2 = b3LengthSquared( angularError );
-		float beta = B3_JOINT_BAUMGARTE;
-		float cap = B3_JOINT_MAX_ANGULAR_BIAS;
-		if ( err2 > B3_JOINT_SNAP_ANGULAR * B3_JOINT_SNAP_ANGULAR )
+		if ( err2 > B3_JOINT_ANGULAR_SLOP * B3_JOINT_ANGULAR_SLOP )
 		{
-			beta = B3_JOINT_BAUMGARTE_SNAP;
-			cap = B3_JOINT_MAX_ANGULAR_BIAS_SNAP;
+			float cap = err2 > B3_JOINT_SNAP_ANGULAR * B3_JOINT_SNAP_ANGULAR ? B3_JOINT_MAX_ANGULAR_BIAS_SNAP
+																			: B3_JOINT_MAX_ANGULAR_BIAS;
+			b3Vec3 raw = b3MulSV( B3_JOINT_BAUMGARTE * context->inv_h, angularError );
+			float length = b3Length( raw );
+			if ( length > cap && length > 0.0f )
+			{
+				raw = b3MulSV( cap / length, raw );
+			}
+			bias = raw;
 		}
-		bias = b3ClampJointBiasVec( b3MulSV( beta * context->inv_h, angularError ), cap );
 	}
 
 	const b3Vec3 axes[3] = { b3Vec3_axisX, b3Vec3_axisY, b3Vec3_axisZ };
@@ -242,14 +239,8 @@ static void b3EmitAxisAngular( b3JointRow* rows, int* count, int capacity, b3Joi
 	float bias = 0.0f;
 	if ( useBias && b3AbsFloat( c ) > B3_JOINT_ANGULAR_SLOP )
 	{
-		float beta = B3_JOINT_BAUMGARTE;
-		float cap = B3_JOINT_MAX_ANGULAR_BIAS;
-		if ( b3AbsFloat( c ) > B3_JOINT_SNAP_ANGULAR )
-		{
-			beta = B3_JOINT_BAUMGARTE_SNAP;
-			cap = B3_JOINT_MAX_ANGULAR_BIAS_SNAP;
-		}
-		bias = b3ClampJointBias( beta * context->inv_h * c, cap );
+		float cap = b3AbsFloat( c ) > B3_JOINT_SNAP_ANGULAR ? B3_JOINT_MAX_ANGULAR_BIAS_SNAP : B3_JOINT_MAX_ANGULAR_BIAS;
+		bias = b3ClampFloat( B3_JOINT_BAUMGARTE * context->inv_h * c, -cap, cap );
 	}
 
 	b3JointRow* row = b3PushRow( rows, count, capacity );
@@ -394,7 +385,7 @@ static void b3EmitJoint( b3JointRow* rows, int* count, int capacity, b3JointSim*
 						beta = B3_JOINT_BAUMGARTE_SNAP;
 						cap = B3_JOINT_MAX_LINEAR_BIAS_SNAP;
 					}
-					bias = b3ClampJointBias( beta * context->inv_h * cs[k], cap );
+					bias = b3ClampFloat( beta * context->inv_h * cs[k], -cap, cap );
 				}
 				b3JointRow* row = b3PushRow( rows, count, capacity );
 				row->indexA = joint->indexA;
@@ -405,6 +396,7 @@ static void b3EmitJoint( b3JointRow* rows, int* count, int capacity, b3JointSim*
 				row->jAngB = b3Cross( rB, n );
 				b3FillRowMass( row, base );
 				row->rhs = cdot + bias;
+				row->posErr = cs[k];
 				row->lambda = lambdas[k];
 			}
 		}
@@ -446,7 +438,7 @@ static void b3EmitJoint( b3JointRow* rows, int* count, int capacity, b3JointSim*
 					beta = B3_JOINT_BAUMGARTE_SNAP;
 					cap = B3_JOINT_MAX_LINEAR_BIAS_SNAP;
 				}
-				bias = b3ClampJointBias( beta * context->inv_h * c, cap );
+				bias = b3ClampFloat( beta * context->inv_h * c, -cap, cap );
 			}
 
 			b3JointRow* row = b3PushRow( rows, count, capacity );
@@ -458,6 +450,7 @@ static void b3EmitJoint( b3JointRow* rows, int* count, int capacity, b3JointSim*
 			row->jAngB = b3Cross( rB, axis );
 			b3FillRowMass( row, base );
 			row->rhs = cdot + bias;
+			row->posErr = c;
 			row->lambda = &joint->impulse;
 		}
 		break;
@@ -795,21 +788,12 @@ static void b3SolveIslandDense( b3StepContext* context, const b3JointRow* rows, 
 	b3ApplyIsland( context, rows, idx, n, x, savedLin, savedAng );
 }
 
-static void b3SolveIslandPcg( b3StepContext* context, const b3JointRow* rows, const int* idx, int n, float* x, float* b, float* r,
-							  float* z, float* p, float* ap, float* invDiag, float* scale, b3Vec3* dLin, b3Vec3* dAng )
+static void b3JointPcgSolve( const b3JointRow* rows, const int* idx, int n, float* x, const float* b, float* r, float* z,
+							 float* p, float* ap, const float* invDiag, const float* scale, b3Vec3* dLin, b3Vec3* dAng )
 {
 	const float cfm = B3_JOINT_DIAG_EPS + B3_JOINT_CFM_TREE;
 	for ( int i = 0; i < n; ++i )
 	{
-		const b3JointRow* row = rows + idx[i];
-		float d = b3RowDotMinv( row, row );
-		if ( d < B3_JOINT_DIAG_EPS )
-		{
-			d = B3_JOINT_DIAG_EPS;
-		}
-		scale[i] = 1.0f / sqrtf( d );
-		invDiag[i] = 1.0f / ( 1.0f + cfm );
-		b[i] = -row->rhs * scale[i];
 		x[i] = 0.0f;
 		r[i] = b[i];
 		z[i] = invDiag[i] * r[i];
@@ -891,7 +875,26 @@ static void b3SolveIslandPcg( b3StepContext* context, const b3JointRow* rows, co
 	{
 		x[i] *= scale[i];
 	}
+}
 
+static void b3SolveIslandPcg( b3StepContext* context, const b3JointRow* rows, const int* idx, int n, float* x, float* b, float* r,
+							  float* z, float* p, float* ap, float* invDiag, float* scale, b3Vec3* dLin, b3Vec3* dAng )
+{
+	const float cfm = B3_JOINT_DIAG_EPS + B3_JOINT_CFM_TREE;
+	for ( int i = 0; i < n; ++i )
+	{
+		const b3JointRow* row = rows + idx[i];
+		float d = b3RowDotMinv( row, row );
+		if ( d < B3_JOINT_DIAG_EPS )
+		{
+			d = B3_JOINT_DIAG_EPS;
+		}
+		scale[i] = 1.0f / sqrtf( d );
+		invDiag[i] = 1.0f / ( 1.0f + cfm );
+		b[i] = -row->rhs * scale[i];
+	}
+
+	b3JointPcgSolve( rows, idx, n, x, b, r, z, p, ap, invDiag, scale, dLin, dAng );
 	b3ApplyIsland( context, rows, idx, n, x, dLin, dAng );
 }
 
@@ -1008,6 +1011,7 @@ void b3SolveJoints_Direct( b3StepContext* context, bool useBias )
 		for ( int r = pairBegin[p]; r < pairEnd[p]; ++r )
 		{
 			score = b3MaxFloat( score, b3AbsFloat( rows[r].rhs ) );
+			score = b3MaxFloat( score, b3AbsFloat( rows[r].posErr ) * context->inv_h );
 		}
 		pairOrd[p].score = score;
 		pairOrd[p].index = p;
