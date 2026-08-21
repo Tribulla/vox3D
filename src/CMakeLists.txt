@@ -41,6 +41,8 @@ set(BOX3D_SOURCE_FILES
 	island.h
 	joint.c
 	joint.h
+	joint_solver.c
+	joint_solver.h
 	manifold.c
 	manifold.h
 	math_functions.c

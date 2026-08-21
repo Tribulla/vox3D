@@ -565,6 +565,760 @@ static int TestWheelJoint( void )
 	return FinishJoint( jointId, f.worldId );
 }
 
+static int TestHangingSphericalChain( void )
+{
+	b3WorldDef worldDef = b3DefaultWorldDef();
+	b3WorldId worldId = b3CreateWorld( &worldDef );
+
+	b3BodyDef groundDef = b3DefaultBodyDef();
+	b3BodyId groundId = b3CreateBody( worldId, &groundDef );
+
+	enum
+	{
+		kLinkCount = 12
+	};
+	const float halfExtent = 0.5f;
+	b3BoxHull box = b3MakeBoxHull( halfExtent, 0.125f, 0.125f );
+
+	b3BodyDef bodyDef = b3DefaultBodyDef();
+	bodyDef.type = b3_dynamicBody;
+
+	b3ShapeDef shapeDef = b3DefaultShapeDef();
+	shapeDef.density = 5.0f;
+
+	b3SphericalJointDef jointDef = b3DefaultSphericalJointDef();
+	b3JointId jointIds[kLinkCount];
+	b3BodyId parent = groundId;
+	float x = 0.0f;
+
+	for ( int i = 0; i < kLinkCount; ++i )
+	{
+		x += halfExtent;
+		bodyDef.position = (b3Pos){ x, 10.0f, 0.0f };
+		b3BodyId bodyId = b3CreateBody( worldId, &bodyDef );
+		b3CreateHullShape( bodyId, &shapeDef, &box.base );
+
+		jointDef.base.bodyIdA = parent;
+		jointDef.base.bodyIdB = bodyId;
+		jointDef.base.localFrameA.p = ( i == 0 ) ? (b3Vec3){ 0.0f, 10.0f, 0.0f } : (b3Vec3){ halfExtent, 0.0f, 0.0f };
+		jointDef.base.localFrameB.p = (b3Vec3){ -halfExtent, 0.0f, 0.0f };
+		jointIds[i] = b3CreateSphericalJoint( worldId, &jointDef );
+
+		parent = bodyId;
+		x += halfExtent;
+	}
+
+	for ( int i = 0; i < 120; ++i )
+	{
+		b3World_Step( worldId, 1.0f / 60.0f, 4 );
+	}
+
+	float maxSeparation = 0.0f;
+	for ( int i = 0; i < kLinkCount; ++i )
+	{
+		float separation = b3Joint_GetLinearSeparation( jointIds[i] );
+		maxSeparation = b3MaxFloat( maxSeparation, separation );
+	}
+
+	if ( maxSeparation >= 0.01f )
+	{
+		printf( "  hanging spherical chain maxSeparation=%g\n", maxSeparation );
+	}
+
+	ENSURE( maxSeparation < 0.01f );
+
+	b3DestroyWorld( worldId );
+	return 0;
+}
+
+static int TestWeldCantilever( void )
+{
+	b3WorldDef worldDef = b3DefaultWorldDef();
+	b3WorldId worldId = b3CreateWorld( &worldDef );
+
+	b3BodyDef groundDef = b3DefaultBodyDef();
+	b3BodyId groundId = b3CreateBody( worldId, &groundDef );
+
+	b3BodyDef bodyDef = b3DefaultBodyDef();
+	bodyDef.type = b3_dynamicBody;
+	bodyDef.position = (b3Pos){ 2.0f, 5.0f, 0.0f };
+	b3BodyId bodyId = b3CreateBody( worldId, &bodyDef );
+
+	b3ShapeDef shapeDef = b3DefaultShapeDef();
+	shapeDef.density = 10.0f;
+	b3BoxHull box = b3MakeBoxHull( 2.0f, 0.15f, 0.15f );
+	b3CreateHullShape( bodyId, &shapeDef, &box.base );
+
+	b3WeldJointDef jointDef = b3DefaultWeldJointDef();
+	jointDef.base.bodyIdA = groundId;
+	jointDef.base.bodyIdB = bodyId;
+	jointDef.base.localFrameA.p = (b3Vec3){ 0.0f, 5.0f, 0.0f };
+	jointDef.base.localFrameB.p = (b3Vec3){ -2.0f, 0.0f, 0.0f };
+	b3JointId jointId = b3CreateWeldJoint( worldId, &jointDef );
+
+	for ( int i = 0; i < 120; ++i )
+	{
+		b3World_Step( worldId, 1.0f / 60.0f, 4 );
+	}
+
+	float linearSeparation = b3Joint_GetLinearSeparation( jointId );
+	float angularSeparation = b3Joint_GetAngularSeparation( jointId );
+	ENSURE( linearSeparation < 0.005f );
+	ENSURE( angularSeparation < 0.01f );
+
+	b3DestroyWorld( worldId );
+	return 0;
+}
+
+static int TestHangingWeldChain( void )
+{
+	b3WorldDef worldDef = b3DefaultWorldDef();
+	b3WorldId worldId = b3CreateWorld( &worldDef );
+
+	b3BodyDef groundDef = b3DefaultBodyDef();
+	b3BodyId groundId = b3CreateBody( worldId, &groundDef );
+
+	enum
+	{
+		kLinkCount = 8
+	};
+	const float hx = 0.5f;
+	const float hy = 0.1f;
+	b3BoxHull box = b3MakeBoxHull( hx, hy, hy );
+
+	b3BodyDef bodyDef = b3DefaultBodyDef();
+	bodyDef.type = b3_dynamicBody;
+
+	b3ShapeDef shapeDef = b3DefaultShapeDef();
+	shapeDef.density = 2.0f;
+
+	b3WeldJointDef jointDef = b3DefaultWeldJointDef();
+	b3JointId jointIds[kLinkCount];
+	b3BodyId parent = groundId;
+	float x = 0.0f;
+
+	for ( int i = 0; i < kLinkCount; ++i )
+	{
+		x += hx;
+		bodyDef.position = (b3Pos){ x, 10.0f, 0.0f };
+		b3BodyId bodyId = b3CreateBody( worldId, &bodyDef );
+		b3CreateHullShape( bodyId, &shapeDef, &box.base );
+
+		jointDef.base.bodyIdA = parent;
+		jointDef.base.bodyIdB = bodyId;
+		jointDef.base.localFrameA.p = ( i == 0 ) ? (b3Vec3){ 0.0f, 10.0f, 0.0f } : (b3Vec3){ hx, 0.0f, 0.0f };
+		jointDef.base.localFrameB.p = (b3Vec3){ -hx, 0.0f, 0.0f };
+		jointIds[i] = b3CreateWeldJoint( worldId, &jointDef );
+
+		parent = bodyId;
+		x += hx;
+	}
+
+	for ( int i = 0; i < 180; ++i )
+	{
+		b3World_Step( worldId, 1.0f / 60.0f, 4 );
+	}
+
+	float maxLinear = 0.0f;
+	float maxAngular = 0.0f;
+	for ( int i = 0; i < kLinkCount; ++i )
+	{
+		maxLinear = b3MaxFloat( maxLinear, b3Joint_GetLinearSeparation( jointIds[i] ) );
+		maxAngular = b3MaxFloat( maxAngular, b3Joint_GetAngularSeparation( jointIds[i] ) );
+	}
+
+	if ( maxLinear >= 0.01f || maxAngular >= 0.02f )
+	{
+		printf( "  hanging weld chain maxLinear=%g maxAngular=%g\n", maxLinear, maxAngular );
+	}
+
+	ENSURE( maxLinear < 0.01f );
+	ENSURE( maxAngular < 0.02f );
+
+	b3DestroyWorld( worldId );
+	return 0;
+}
+
+// Overconstrained weld grid on the ground. A tree-shaped chain is full rank;
+// a voxel-style lattice is not, and used to explode on the first step.
+static int TestWeldLatticeOnGround( void )
+{
+	enum
+	{
+		kN = 3
+	};
+	const float h = 0.5f;
+	const float spacing = 2.0f * h;
+
+	b3WorldDef worldDef = b3DefaultWorldDef();
+	b3WorldId worldId = b3CreateWorld( &worldDef );
+
+	b3BodyDef groundDef = b3DefaultBodyDef();
+	groundDef.position = (b3Pos){ 0.0f, -0.5f, 0.0f };
+	b3BodyId groundId = b3CreateBody( worldId, &groundDef );
+	b3ShapeDef groundShape = b3DefaultShapeDef();
+	b3BoxHull groundBox = b3MakeBoxHull( 20.0f, 0.5f, 20.0f );
+	b3CreateHullShape( groundId, &groundShape, &groundBox.base );
+
+	b3BodyDef bodyDef = b3DefaultBodyDef();
+	bodyDef.type = b3_dynamicBody;
+	b3ShapeDef shapeDef = b3DefaultShapeDef();
+	shapeDef.density = 1.0f;
+	b3BoxHull box = b3MakeBoxHull( h, h, h );
+
+	b3WeldJointDef jointDef = b3DefaultWeldJointDef();
+	b3BodyId bodies[kN][kN][kN];
+	b3JointId joints[3 * kN * kN * kN];
+	int jointCount = 0;
+
+	for ( int iz = 0; iz < kN; ++iz )
+	{
+		for ( int iy = 0; iy < kN; ++iy )
+		{
+			for ( int ix = 0; ix < kN; ++ix )
+			{
+				bodyDef.position = (b3Pos){ ( ix - 1 ) * spacing, 2.0f + iy * spacing, ( iz - 1 ) * spacing };
+				bodies[ix][iy][iz] = b3CreateBody( worldId, &bodyDef );
+				b3CreateHullShape( bodies[ix][iy][iz], &shapeDef, &box.base );
+			}
+		}
+	}
+
+	for ( int iz = 0; iz < kN; ++iz )
+	{
+		for ( int iy = 0; iy < kN; ++iy )
+		{
+			for ( int ix = 0; ix < kN; ++ix )
+			{
+				if ( ix + 1 < kN )
+				{
+					jointDef.base.bodyIdA = bodies[ix][iy][iz];
+					jointDef.base.bodyIdB = bodies[ix + 1][iy][iz];
+					jointDef.base.localFrameA.p = (b3Vec3){ h, 0.0f, 0.0f };
+					jointDef.base.localFrameB.p = (b3Vec3){ -h, 0.0f, 0.0f };
+					joints[jointCount++] = b3CreateWeldJoint( worldId, &jointDef );
+				}
+				if ( iy + 1 < kN )
+				{
+					jointDef.base.bodyIdA = bodies[ix][iy][iz];
+					jointDef.base.bodyIdB = bodies[ix][iy + 1][iz];
+					jointDef.base.localFrameA.p = (b3Vec3){ 0.0f, h, 0.0f };
+					jointDef.base.localFrameB.p = (b3Vec3){ 0.0f, -h, 0.0f };
+					joints[jointCount++] = b3CreateWeldJoint( worldId, &jointDef );
+				}
+				if ( iz + 1 < kN )
+				{
+					jointDef.base.bodyIdA = bodies[ix][iy][iz];
+					jointDef.base.bodyIdB = bodies[ix][iy][iz + 1];
+					jointDef.base.localFrameA.p = (b3Vec3){ 0.0f, 0.0f, h };
+					jointDef.base.localFrameB.p = (b3Vec3){ 0.0f, 0.0f, -h };
+					joints[jointCount++] = b3CreateWeldJoint( worldId, &jointDef );
+				}
+			}
+		}
+	}
+
+	for ( int i = 0; i < 180; ++i )
+	{
+		b3World_Step( worldId, 1.0f / 60.0f, 4 );
+	}
+
+	float maxSpeed = 0.0f;
+	float maxLinear = 0.0f;
+	for ( int iz = 0; iz < kN; ++iz )
+	{
+		for ( int iy = 0; iy < kN; ++iy )
+		{
+			for ( int ix = 0; ix < kN; ++ix )
+			{
+				b3Vec3 v = b3Body_GetLinearVelocity( bodies[ix][iy][iz] );
+				ENSURE( b3IsValidVec3( v ) );
+				maxSpeed = b3MaxFloat( maxSpeed, b3Length( v ) );
+
+				b3Pos p = b3Body_GetPosition( bodies[ix][iy][iz] );
+				ENSURE( p.y > -1.0f && p.y < 20.0f );
+			}
+		}
+	}
+
+	for ( int i = 0; i < jointCount; ++i )
+	{
+		maxLinear = b3MaxFloat( maxLinear, b3Joint_GetLinearSeparation( joints[i] ) );
+	}
+
+	if ( maxSpeed >= 40.0f || maxLinear >= 0.05f )
+	{
+		printf( "  weld lattice maxSpeed=%g maxLinear=%g\n", maxSpeed, maxLinear );
+	}
+
+	ENSURE( maxSpeed < 40.0f );
+	ENSURE( maxLinear < 0.05f );
+
+	b3DestroyWorld( worldId );
+	return 0;
+}
+
+// Hanging weld chain attached to a dynamic box that is sitting on the ground.
+static int TestHangingWeldFromDynamicOnGround( void )
+{
+	b3WorldDef worldDef = b3DefaultWorldDef();
+	b3WorldId worldId = b3CreateWorld( &worldDef );
+
+	b3BodyDef groundDef = b3DefaultBodyDef();
+	groundDef.position = (b3Pos){ 0.0f, -0.5f, 0.0f };
+	b3BodyId groundId = b3CreateBody( worldId, &groundDef );
+	b3ShapeDef groundShape = b3DefaultShapeDef();
+	b3BoxHull groundBox = b3MakeBoxHull( 20.0f, 0.5f, 20.0f );
+	b3CreateHullShape( groundId, &groundShape, &groundBox.base );
+
+	b3BodyDef bodyDef = b3DefaultBodyDef();
+	bodyDef.type = b3_dynamicBody;
+	bodyDef.position = (b3Pos){ 0.0f, 1.0f, 0.0f };
+	b3BodyId boxId = b3CreateBody( worldId, &bodyDef );
+	b3ShapeDef shapeDef = b3DefaultShapeDef();
+	shapeDef.density = 4.0f;
+	b3BoxHull rootBox = b3MakeBoxHull( 1.0f, 1.0f, 1.0f );
+	b3CreateHullShape( boxId, &shapeDef, &rootBox.base );
+
+	enum
+	{
+		kLinkCount = 8
+	};
+	const float hx = 0.5f;
+	const float hy = 0.1f;
+	b3BoxHull linkBox = b3MakeBoxHull( hx, hy, hy );
+	shapeDef.density = 2.0f;
+
+	b3WeldJointDef jointDef = b3DefaultWeldJointDef();
+	b3JointId jointIds[kLinkCount];
+	b3BodyId parent = boxId;
+	float x = 1.0f;
+
+	for ( int i = 0; i < kLinkCount; ++i )
+	{
+		x += hx;
+		bodyDef.position = (b3Pos){ x, 1.0f, 0.0f };
+		b3BodyId bodyId = b3CreateBody( worldId, &bodyDef );
+		b3CreateHullShape( bodyId, &shapeDef, &linkBox.base );
+
+		jointDef.base.bodyIdA = parent;
+		jointDef.base.bodyIdB = bodyId;
+		jointDef.base.localFrameA.p = ( i == 0 ) ? (b3Vec3){ 1.0f, 0.0f, 0.0f } : (b3Vec3){ hx, 0.0f, 0.0f };
+		jointDef.base.localFrameB.p = (b3Vec3){ -hx, 0.0f, 0.0f };
+		jointIds[i] = b3CreateWeldJoint( worldId, &jointDef );
+
+		parent = bodyId;
+		x += hx;
+	}
+
+	for ( int i = 0; i < 180; ++i )
+	{
+		b3World_Step( worldId, 1.0f / 60.0f, 4 );
+	}
+
+	b3Vec3 rootV = b3Body_GetLinearVelocity( boxId );
+	ENSURE( b3IsValidVec3( rootV ) );
+	ENSURE( b3Length( rootV ) < 20.0f );
+
+	b3Pos rootP = b3Body_GetPosition( boxId );
+	ENSURE( rootP.y > 0.0f && rootP.y < 8.0f );
+
+	float maxLinear = 0.0f;
+	float maxAngular = 0.0f;
+	for ( int i = 0; i < kLinkCount; ++i )
+	{
+		maxLinear = b3MaxFloat( maxLinear, b3Joint_GetLinearSeparation( jointIds[i] ) );
+		maxAngular = b3MaxFloat( maxAngular, b3Joint_GetAngularSeparation( jointIds[i] ) );
+	}
+
+	if ( maxLinear >= 0.02f || maxAngular >= 0.04f )
+	{
+		printf( "  hanging weld from dynamic maxLinear=%g maxAngular=%g\n", maxLinear, maxAngular );
+	}
+
+	ENSURE( maxLinear < 0.02f );
+	ENSURE( maxAngular < 0.04f );
+
+	b3DestroyWorld( worldId );
+	return 0;
+}
+
+// Lattice plus a hanging chain. Without splitting the Direct island, the
+// redundant welds and the chain share one Schur system and explode.
+static int TestWeldLatticeWithHangingChain( void )
+{
+	enum
+	{
+		kN = 3,
+		kLinkCount = 8
+	};
+	const float h = 0.5f;
+	const float spacing = 2.0f * h;
+
+	b3WorldDef worldDef = b3DefaultWorldDef();
+	b3WorldId worldId = b3CreateWorld( &worldDef );
+
+	b3BodyDef groundDef = b3DefaultBodyDef();
+	groundDef.position = (b3Pos){ 0.0f, -0.5f, 0.0f };
+	b3BodyId groundId = b3CreateBody( worldId, &groundDef );
+	b3ShapeDef groundShape = b3DefaultShapeDef();
+	b3BoxHull groundBox = b3MakeBoxHull( 20.0f, 0.5f, 20.0f );
+	b3CreateHullShape( groundId, &groundShape, &groundBox.base );
+
+	b3BodyDef bodyDef = b3DefaultBodyDef();
+	bodyDef.type = b3_dynamicBody;
+	b3ShapeDef shapeDef = b3DefaultShapeDef();
+	shapeDef.density = 1.0f;
+	b3BoxHull box = b3MakeBoxHull( h, h, h );
+
+	b3WeldJointDef jointDef = b3DefaultWeldJointDef();
+	b3BodyId bodies[kN][kN][kN];
+
+	for ( int iz = 0; iz < kN; ++iz )
+	{
+		for ( int iy = 0; iy < kN; ++iy )
+		{
+			for ( int ix = 0; ix < kN; ++ix )
+			{
+				bodyDef.position = (b3Pos){ ( ix - 1 ) * spacing, 2.0f + iy * spacing, ( iz - 1 ) * spacing };
+				bodies[ix][iy][iz] = b3CreateBody( worldId, &bodyDef );
+				b3CreateHullShape( bodies[ix][iy][iz], &shapeDef, &box.base );
+			}
+		}
+	}
+
+	for ( int iz = 0; iz < kN; ++iz )
+	{
+		for ( int iy = 0; iy < kN; ++iy )
+		{
+			for ( int ix = 0; ix < kN; ++ix )
+			{
+				if ( ix + 1 < kN )
+				{
+					jointDef.base.bodyIdA = bodies[ix][iy][iz];
+					jointDef.base.bodyIdB = bodies[ix + 1][iy][iz];
+					jointDef.base.localFrameA.p = (b3Vec3){ h, 0.0f, 0.0f };
+					jointDef.base.localFrameB.p = (b3Vec3){ -h, 0.0f, 0.0f };
+					b3CreateWeldJoint( worldId, &jointDef );
+				}
+				if ( iy + 1 < kN )
+				{
+					jointDef.base.bodyIdA = bodies[ix][iy][iz];
+					jointDef.base.bodyIdB = bodies[ix][iy + 1][iz];
+					jointDef.base.localFrameA.p = (b3Vec3){ 0.0f, h, 0.0f };
+					jointDef.base.localFrameB.p = (b3Vec3){ 0.0f, -h, 0.0f };
+					b3CreateWeldJoint( worldId, &jointDef );
+				}
+				if ( iz + 1 < kN )
+				{
+					jointDef.base.bodyIdA = bodies[ix][iy][iz];
+					jointDef.base.bodyIdB = bodies[ix][iy][iz + 1];
+					jointDef.base.localFrameA.p = (b3Vec3){ 0.0f, 0.0f, h };
+					jointDef.base.localFrameB.p = (b3Vec3){ 0.0f, 0.0f, -h };
+					b3CreateWeldJoint( worldId, &jointDef );
+				}
+			}
+		}
+	}
+
+	const float hx = 0.5f;
+	const float hy = 0.1f;
+	b3BoxHull linkBox = b3MakeBoxHull( hx, hy, hy );
+	shapeDef.density = 2.0f;
+	b3JointId chainIds[kLinkCount];
+	b3BodyId parent = bodies[kN - 1][0][1];
+	b3Pos parentPos = b3Body_GetPosition( parent );
+	float x = parentPos.x + h;
+
+	for ( int i = 0; i < kLinkCount; ++i )
+	{
+		x += hx;
+		bodyDef.position = (b3Pos){ x, parentPos.y, parentPos.z };
+		b3BodyId bodyId = b3CreateBody( worldId, &bodyDef );
+		b3CreateHullShape( bodyId, &shapeDef, &linkBox.base );
+
+		jointDef.base.bodyIdA = parent;
+		jointDef.base.bodyIdB = bodyId;
+		jointDef.base.localFrameA.p = ( i == 0 ) ? (b3Vec3){ h, 0.0f, 0.0f } : (b3Vec3){ hx, 0.0f, 0.0f };
+		jointDef.base.localFrameB.p = (b3Vec3){ -hx, 0.0f, 0.0f };
+		chainIds[i] = b3CreateWeldJoint( worldId, &jointDef );
+
+		parent = bodyId;
+		x += hx;
+	}
+
+	for ( int i = 0; i < 180; ++i )
+	{
+		b3World_Step( worldId, 1.0f / 60.0f, 4 );
+	}
+
+	float maxSpeed = 0.0f;
+	for ( int iz = 0; iz < kN; ++iz )
+	{
+		for ( int iy = 0; iy < kN; ++iy )
+		{
+			for ( int ix = 0; ix < kN; ++ix )
+			{
+				b3Vec3 v = b3Body_GetLinearVelocity( bodies[ix][iy][iz] );
+				ENSURE( b3IsValidVec3( v ) );
+				maxSpeed = b3MaxFloat( maxSpeed, b3Length( v ) );
+				b3Pos p = b3Body_GetPosition( bodies[ix][iy][iz] );
+				ENSURE( p.y > -1.0f && p.y < 20.0f );
+			}
+		}
+	}
+
+	float maxLinear = 0.0f;
+	for ( int i = 0; i < kLinkCount; ++i )
+	{
+		b3Vec3 v = b3Body_GetLinearVelocity( b3Joint_GetBodyB( chainIds[i] ) );
+		ENSURE( b3IsValidVec3( v ) );
+		maxSpeed = b3MaxFloat( maxSpeed, b3Length( v ) );
+		maxLinear = b3MaxFloat( maxLinear, b3Joint_GetLinearSeparation( chainIds[i] ) );
+	}
+
+	if ( maxSpeed >= 5.0f || maxLinear >= 0.05f )
+	{
+		printf( "  lattice+chain maxSpeed=%g maxLinear=%g\n", maxSpeed, maxLinear );
+	}
+
+	ENSURE( maxSpeed < 5.0f );
+	ENSURE( maxLinear < 0.05f );
+
+	b3DestroyWorld( worldId );
+	return 0;
+}
+
+// Elongated hull planks on the floor, welded end to end — the app scene on this
+// branch, not a voxel lattice. Sleep is off so a NaN Direct solve would freeze
+// the chain in place the same way the app does.
+static int TestWeldPlankChainOnGround( void )
+{
+	b3WorldDef worldDef = b3DefaultWorldDef();
+	worldDef.enableSleep = false;
+	b3WorldId worldId = b3CreateWorld( &worldDef );
+
+	b3BodyDef groundDef = b3DefaultBodyDef();
+	groundDef.position = (b3Pos){ 0.0f, -0.5f, 0.0f };
+	b3BodyId groundId = b3CreateBody( worldId, &groundDef );
+	b3ShapeDef groundShape = b3DefaultShapeDef();
+	b3BoxHull groundBox = b3MakeBoxHull( 40.0f, 0.5f, 40.0f );
+	b3CreateHullShape( groundId, &groundShape, &groundBox.base );
+
+	enum
+	{
+		kLinkCount = 6
+	};
+	const float hx = 1.5f;
+	const float hy = 0.12f;
+	b3BoxHull box = b3MakeBoxHull( hx, hy, hy );
+
+	b3BodyDef bodyDef = b3DefaultBodyDef();
+	bodyDef.type = b3_dynamicBody;
+	bodyDef.enableSleep = false;
+
+	b3ShapeDef shapeDef = b3DefaultShapeDef();
+	shapeDef.density = 2.0f;
+
+	b3WeldJointDef jointDef = b3DefaultWeldJointDef();
+	b3BodyId bodies[kLinkCount];
+	b3JointId jointIds[kLinkCount - 1];
+
+	float x = 0.0f;
+	for ( int i = 0; i < kLinkCount; ++i )
+	{
+		x += hx;
+		bodyDef.position = (b3Pos){ x, hy + 0.02f, 0.0f };
+		bodies[i] = b3CreateBody( worldId, &bodyDef );
+		b3CreateHullShape( bodies[i], &shapeDef, &box.base );
+		x += hx;
+	}
+
+	for ( int i = 0; i < kLinkCount - 1; ++i )
+	{
+		jointDef.base.bodyIdA = bodies[i];
+		jointDef.base.bodyIdB = bodies[i + 1];
+		jointDef.base.localFrameA.p = (b3Vec3){ hx, 0.0f, 0.0f };
+		jointDef.base.localFrameB.p = (b3Vec3){ -hx, 0.0f, 0.0f };
+		jointIds[i] = b3CreateWeldJoint( worldId, &jointDef );
+	}
+
+	for ( int i = 0; i < 180; ++i )
+	{
+		b3World_Step( worldId, 1.0f / 60.0f, 4 );
+	}
+
+	float maxSpeed = 0.0f;
+	float maxLinear = 0.0f;
+	for ( int i = 0; i < kLinkCount; ++i )
+	{
+		b3Vec3 v = b3Body_GetLinearVelocity( bodies[i] );
+		ENSURE( b3IsValidVec3( v ) );
+		maxSpeed = b3MaxFloat( maxSpeed, b3Length( v ) );
+		b3Pos p = b3Body_GetPosition( bodies[i] );
+		ENSURE( p.y > -1.0f && p.y < 20.0f );
+	}
+	for ( int i = 0; i < kLinkCount - 1; ++i )
+	{
+		maxLinear = b3MaxFloat( maxLinear, b3Joint_GetLinearSeparation( jointIds[i] ) );
+	}
+
+	if ( maxSpeed >= 8.0f || maxLinear >= 0.05f )
+	{
+		printf( "  plank chain maxSpeed=%g maxLinear=%g\n", maxSpeed, maxLinear );
+	}
+
+	ENSURE( maxSpeed < 8.0f );
+	ENSURE( maxLinear < 0.05f );
+
+	b3DestroyWorld( worldId );
+	return 0;
+}
+
+// Two equal-mass boxes welded together, then one is teleported away. Both
+// bodies must move toward each other and the gap must close quickly.
+static int TestWeldPullApartRecovery( void )
+{
+	b3WorldDef worldDef = b3DefaultWorldDef();
+	worldDef.gravity = b3Vec3_zero;
+	worldDef.enableSleep = false;
+	b3WorldId worldId = b3CreateWorld( &worldDef );
+
+	b3BodyDef bodyDef = b3DefaultBodyDef();
+	bodyDef.type = b3_dynamicBody;
+	bodyDef.enableSleep = false;
+
+	b3ShapeDef shapeDef = b3DefaultShapeDef();
+	shapeDef.density = 1.0f;
+	b3BoxHull box = b3MakeBoxHull( 0.5f, 0.5f, 0.5f );
+
+	bodyDef.position = (b3Pos){ 0.0f, 0.0f, 0.0f };
+	b3BodyId bodyA = b3CreateBody( worldId, &bodyDef );
+	b3CreateHullShape( bodyA, &shapeDef, &box.base );
+
+	bodyDef.position = (b3Pos){ 1.0f, 0.0f, 0.0f };
+	b3BodyId bodyB = b3CreateBody( worldId, &bodyDef );
+	b3CreateHullShape( bodyB, &shapeDef, &box.base );
+
+	b3WeldJointDef jointDef = b3DefaultWeldJointDef();
+	jointDef.base.bodyIdA = bodyA;
+	jointDef.base.bodyIdB = bodyB;
+	jointDef.base.localFrameA.p = (b3Vec3){ 0.5f, 0.0f, 0.0f };
+	jointDef.base.localFrameB.p = (b3Vec3){ -0.5f, 0.0f, 0.0f };
+	b3JointId jointId = b3CreateWeldJoint( worldId, &jointDef );
+
+	b3World_Step( worldId, 1.0f / 60.0f, 4 );
+
+	b3Body_SetTransform( bodyB, (b3Pos){ 3.0f, 0.0f, 0.0f }, b3Quat_identity );
+	b3Body_SetLinearVelocity( bodyA, b3Vec3_zero );
+	b3Body_SetLinearVelocity( bodyB, b3Vec3_zero );
+
+	float startSep = b3Joint_GetLinearSeparation( jointId );
+	ENSURE( startSep > 1.5f );
+
+	for ( int i = 0; i < 4; ++i )
+	{
+		b3World_Step( worldId, 1.0f / 60.0f, 4 );
+	}
+
+	b3Pos pA = b3Body_GetPosition( bodyA );
+	b3Pos pB = b3Body_GetPosition( bodyB );
+	float sep = b3Joint_GetLinearSeparation( jointId );
+
+	if ( pA.x <= 0.05f || pB.x >= 2.95f || sep >= 0.15f )
+	{
+		printf( "  pull-apart pA.x=%g pB.x=%g sep=%g\n", pA.x, pB.x, sep );
+	}
+
+	ENSURE( pA.x > 0.05f );
+	ENSURE( pB.x < 2.95f );
+	ENSURE( sep < 0.15f );
+
+	b3DestroyWorld( worldId );
+	return 0;
+}
+
+// Five equal boxes welded in a line, plus a chord from the first to the last.
+// Yanking the middle link used to leave the chord as the spanning tree, so the
+// chain stayed a perfect bar and the middle body was only a stretched leftover.
+static int TestWeldPullMiddleLink( void )
+{
+	b3WorldDef worldDef = b3DefaultWorldDef();
+	worldDef.gravity = b3Vec3_zero;
+	worldDef.enableSleep = false;
+	b3WorldId worldId = b3CreateWorld( &worldDef );
+
+	enum
+	{
+		kCount = 5
+	};
+	b3BodyDef bodyDef = b3DefaultBodyDef();
+	bodyDef.type = b3_dynamicBody;
+	bodyDef.enableSleep = false;
+	b3ShapeDef shapeDef = b3DefaultShapeDef();
+	shapeDef.density = 1.0f;
+	b3BoxHull box = b3MakeBoxHull( 0.5f, 0.5f, 0.5f );
+
+	b3BodyId bodies[kCount];
+	for ( int i = 0; i < kCount; ++i )
+	{
+		bodyDef.position = (b3Pos){ (float)i, 0.0f, 0.0f };
+		bodies[i] = b3CreateBody( worldId, &bodyDef );
+		b3CreateHullShape( bodies[i], &shapeDef, &box.base );
+	}
+
+	b3WeldJointDef jointDef = b3DefaultWeldJointDef();
+	b3JointId chainIds[kCount - 1];
+	for ( int i = 0; i < kCount - 1; ++i )
+	{
+		jointDef.base.bodyIdA = bodies[i];
+		jointDef.base.bodyIdB = bodies[i + 1];
+		jointDef.base.localFrameA.p = (b3Vec3){ 0.5f, 0.0f, 0.0f };
+		jointDef.base.localFrameB.p = (b3Vec3){ -0.5f, 0.0f, 0.0f };
+		chainIds[i] = b3CreateWeldJoint( worldId, &jointDef );
+	}
+
+	jointDef.base.bodyIdA = bodies[0];
+	jointDef.base.bodyIdB = bodies[kCount - 1];
+	jointDef.base.localFrameA.p = (b3Vec3){ 2.0f, 0.0f, 0.0f };
+	jointDef.base.localFrameB.p = (b3Vec3){ -2.0f, 0.0f, 0.0f };
+	b3CreateWeldJoint( worldId, &jointDef );
+
+	b3World_Step( worldId, 1.0f / 60.0f, 4 );
+
+	b3Body_SetTransform( bodies[2], (b3Pos){ 2.0f, 2.0f, 0.0f }, b3Quat_identity );
+	for ( int i = 0; i < kCount; ++i )
+	{
+		b3Body_SetLinearVelocity( bodies[i], b3Vec3_zero );
+	}
+
+	ENSURE( b3Joint_GetLinearSeparation( chainIds[1] ) > 1.5f );
+	ENSURE( b3Joint_GetLinearSeparation( chainIds[2] ) > 1.5f );
+
+	for ( int i = 0; i < 4; ++i )
+	{
+		b3World_Step( worldId, 1.0f / 60.0f, 4 );
+	}
+
+	b3Pos p1 = b3Body_GetPosition( bodies[1] );
+	b3Pos p3 = b3Body_GetPosition( bodies[3] );
+	float sep12 = b3Joint_GetLinearSeparation( chainIds[1] );
+	float sep23 = b3Joint_GetLinearSeparation( chainIds[2] );
+
+	if ( p1.y <= 0.15f || p3.y <= 0.15f || sep12 >= 0.25f || sep23 >= 0.25f )
+	{
+		printf( "  middle-link p1.y=%g p3.y=%g sep12=%g sep23=%g\n", p1.y, p3.y, sep12, sep23 );
+	}
+
+	ENSURE( p1.y > 0.15f );
+	ENSURE( p3.y > 0.15f );
+	ENSURE( sep12 < 0.25f );
+	ENSURE( sep23 < 0.25f );
+
+	b3DestroyWorld( worldId );
+	return 0;
+}
+
 int JointTest( void )
 {
 	RUN_SUBTEST( TestParallelJoint );
@@ -576,6 +1330,15 @@ int JointTest( void )
 	RUN_SUBTEST( TestSphericalJoint );
 	RUN_SUBTEST( TestWeldJoint );
 	RUN_SUBTEST( TestWheelJoint );
+	RUN_SUBTEST( TestHangingSphericalChain );
+	RUN_SUBTEST( TestWeldCantilever );
+	RUN_SUBTEST( TestHangingWeldChain );
+	RUN_SUBTEST( TestWeldLatticeOnGround );
+	RUN_SUBTEST( TestHangingWeldFromDynamicOnGround );
+	RUN_SUBTEST( TestWeldLatticeWithHangingChain );
+	RUN_SUBTEST( TestWeldPlankChainOnGround );
+	RUN_SUBTEST( TestWeldPullApartRecovery );
+	RUN_SUBTEST( TestWeldPullMiddleLink );
 
 	return 0;
 }
