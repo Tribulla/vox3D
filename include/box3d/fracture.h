@@ -69,6 +69,7 @@ typedef struct b3FractureTuning
 							 ///< are removed, a few per step, once over the cap. 0 = unlimited. Big collapses
 							 ///< otherwise leave thousands of rubble bodies for the solver every step.
 	bool fractureEnabled;	 ///< master switch: analyse only vs. actually sever
+	bool stressEnabled;		 ///< alias for contactStress / stress analysis
 	bool contactStress;		 ///< fold Box3D contact forces into the analysis
 	bool parallelAnalysis;	 ///< run the per-body contact gathering and stress analysis on the world's
 							 ///< worker threads (needs b3WorldDef.workerCount > 1; all analyses then see
@@ -83,6 +84,29 @@ typedef enum b3FractureColorMode
 	b3_fractureColorStress,	 ///< blue (safe) -> red (at the breaking point)
 	b3_fractureColorFragment,
 } b3FractureColorMode;
+
+typedef enum b3FractureReason
+{
+	b3_fractureImpact = 0,
+	b3_fractureStress = 1,
+} b3FractureReason;
+
+typedef struct b3FractureEvent
+{
+	b3BodyId parentBody;
+	int reason;
+	float mass;
+	b3Vec3 centerOfMassWorld;
+	b3Vec3 linearVelocity;
+	int cellCount;
+	const b3Vec3i* cells;
+} b3FractureEvent;
+
+typedef struct b3FractureEvents
+{
+	int count;
+	const b3FractureEvent* events;
+} b3FractureEvents;
 
 B3_API void b3World_EnableFracture( b3WorldId worldId, float voxel, float groundY );
 
@@ -102,6 +126,13 @@ B3_API int b3World_CreateFractureConvex( b3WorldId worldId, const b3HullData* hu
 
 B3_API int b3World_MakeBodyFracture( b3WorldId worldId, b3BodyId bodyId, b3FractureMaterial material,
 									 const b3FractureDef* def );
+
+B3_API int b3World_MakeVoxelBodyFracture( b3WorldId worldId, b3BodyId bodyId, b3FractureMaterial material,
+										 const b3FractureDef* def );
+
+B3_API void b3World_RemoveVoxelBodyFracture( b3WorldId worldId, b3BodyId bodyId );
+
+B3_API b3FractureEvents b3World_GetFractureEvents( b3WorldId worldId );
 
 B3_API void b3World_ApplyFractureColors( b3WorldId worldId, b3FractureColorMode mode );
 

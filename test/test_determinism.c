@@ -20,8 +20,8 @@
 #define EXPECTED_SLEEP_STEP 297
 #define EXPECTED_HASH 0x27FF38C1
 #else
-#define EXPECTED_SLEEP_STEP 358
-#define EXPECTED_HASH 0x2D19E6F2
+#define EXPECTED_SLEEP_STEP 328
+#define EXPECTED_HASH 0xB9F3F028
 #endif
 
 static int SingleMultithreadingTest( int workerCount )

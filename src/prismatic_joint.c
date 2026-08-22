@@ -391,11 +391,10 @@ void b3WarmStartPrismaticJoint( b3JointSim* base, b3StepContext* context )
 	b3Vec3 sBz = b3Cross( rB, perpZ );
 
 	float axialImpulse = joint->springImpulse + joint->motorImpulse + joint->lowerImpulse - joint->upperImpulse;
-	b3Vec2 perpImpulse = joint->perpImpulse;
 
-	b3Vec3 P = b3Blend3( axialImpulse, jointAxis, perpImpulse.x, perpY, perpImpulse.y, perpZ );
-	b3Vec3 LA = b3Add( b3Blend3( axialImpulse, sAx, perpImpulse.x, sAy, perpImpulse.y, sAz ), joint->angularImpulse );
-	b3Vec3 LB = b3Add( b3Blend3( axialImpulse, sBx, perpImpulse.x, sBy, perpImpulse.y, sBz ), joint->angularImpulse );
+	b3Vec3 P = b3MulSV( axialImpulse, jointAxis );
+	b3Vec3 LA = b3MulSV( axialImpulse, sAx );
+	b3Vec3 LB = b3MulSV( axialImpulse, sBx );
 
 	b3Vec3 vA = stateA->linearVelocity;
 	b3Vec3 wA = stateA->angularVelocity;

@@ -173,11 +173,14 @@ void b3WarmStartWeldJoint( b3JointSim* base, b3StepContext* context )
 	b3Vec3 rA = b3RotateVector( stateA->deltaRotation, joint->frameA.p );
 	b3Vec3 rB = b3RotateVector( stateB->deltaRotation, joint->frameB.p );
 
-	vA = b3MulSub( vA, mA, joint->linearImpulse );
-	wA = b3Sub( wA, b3MulMV( iA, b3Add( b3Cross( rA, joint->linearImpulse ), joint->angularImpulse ) ) );
+	b3Vec3 linearImpulse = joint->linearHertz > 0.0f ? joint->linearImpulse : b3Vec3_zero;
+	b3Vec3 angularImpulse = joint->angularHertz > 0.0f ? joint->angularImpulse : b3Vec3_zero;
 
-	vB = b3MulAdd( vB, mB, joint->linearImpulse );
-	wB = b3Add( wB, b3MulMV( iB, b3Add( b3Cross( rB, joint->linearImpulse ), joint->angularImpulse ) ) );
+	vA = b3MulSub( vA, mA, linearImpulse );
+	wA = b3Sub( wA, b3MulMV( iA, b3Add( b3Cross( rA, linearImpulse ), angularImpulse ) ) );
+
+	vB = b3MulAdd( vB, mB, linearImpulse );
+	wB = b3Add( wB, b3MulMV( iB, b3Add( b3Cross( rB, linearImpulse ), angularImpulse ) ) );
 
 	if ( stateA->flags & b3_dynamicFlag )
 	{

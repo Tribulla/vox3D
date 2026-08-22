@@ -387,8 +387,8 @@ void b3WarmStartSphericalJoint( b3JointSim* base, b3StepContext* context )
 
 	float mA = base->invMassA;
 	float mB = base->invMassB;
-	b3Matrix3 iA = base->invIA;
-	b3Matrix3 iB = base->invIB;
+	B3_UNUSED( mA );
+	B3_UNUSED( mB );
 
 	// dummy state for static bodies
 	b3BodyState dummyState = b3_identityBodyState;
@@ -398,33 +398,26 @@ void b3WarmStartSphericalJoint( b3JointSim* base, b3StepContext* context )
 	b3BodyState* stateA = joint->indexA == B3_NULL_INDEX ? &dummyState : context->states + joint->indexA;
 	b3BodyState* stateB = joint->indexB == B3_NULL_INDEX ? &dummyState : context->states + joint->indexB;
 
-	b3Vec3 vA = stateA->linearVelocity;
-	b3Vec3 wA = stateA->angularVelocity;
-	b3Vec3 vB = stateB->linearVelocity;
-	b3Vec3 wB = stateB->angularVelocity;
+	b3Matrix3 iA = b3RotateInertia( stateA->deltaRotation, base->invIA );
+	b3Matrix3 iB = b3RotateInertia( stateB->deltaRotation, base->invIB );
 
-	b3Vec3 rA = b3RotateVector( stateA->deltaRotation, joint->frameA.p );
-	b3Vec3 rB = b3RotateVector( stateB->deltaRotation, joint->frameB.p );
+	b3Vec3 wA = stateA->angularVelocity;
+	b3Vec3 wB = stateB->angularVelocity;
 
 	b3Vec3 angularImpulse = b3Add( joint->springImpulse, joint->motorImpulse );
 	angularImpulse = b3MulSub( angularImpulse, joint->swingImpulse, joint->swingAxis );
 	angularImpulse = b3MulAdd( angularImpulse, joint->lowerTwistImpulse - joint->upperTwistImpulse, joint->twistJacobian );
 
-	vA = b3MulSub( vA, mA, joint->linearImpulse );
-	wA = b3Sub( wA, b3MulMV( iA, b3Add( b3Cross( rA, joint->linearImpulse ), angularImpulse ) ) );
-
-	vB = b3MulAdd( vB, mB, joint->linearImpulse );
-	wB = b3Add( wB, b3MulMV( iB, b3Add( b3Cross( rB, joint->linearImpulse ), angularImpulse ) ) );
+	wA = b3Sub( wA, b3MulMV( iA, angularImpulse ) );
+	wB = b3Add( wB, b3MulMV( iB, angularImpulse ) );
 
 	if ( stateA->flags & b3_dynamicFlag )
 	{
-		stateA->linearVelocity = vA;
 		stateA->angularVelocity = wA;
 	}
 
 	if ( stateB->flags & b3_dynamicFlag )
 	{
-		stateB->linearVelocity = vB;
 		stateB->angularVelocity = wB;
 	}
 }
@@ -435,8 +428,6 @@ void b3SolveSphericalJoint( b3JointSim* base, b3StepContext* context, bool useBi
 	float mB = base->invMassB;
 	B3_UNUSED( mA );
 	B3_UNUSED( mB );
-	b3Matrix3 iA = base->invIA;
-	b3Matrix3 iB = base->invIB;
 
 	// dummy state for static bodies
 	b3BodyState dummyState = b3_identityBodyState;
@@ -444,6 +435,9 @@ void b3SolveSphericalJoint( b3JointSim* base, b3StepContext* context, bool useBi
 	b3SphericalJoint* joint = &base->sphericalJoint;
 	b3BodyState* stateA = joint->indexA == B3_NULL_INDEX ? &dummyState : context->states + joint->indexA;
 	b3BodyState* stateB = joint->indexB == B3_NULL_INDEX ? &dummyState : context->states + joint->indexB;
+
+	b3Matrix3 iA = b3RotateInertia( stateA->deltaRotation, base->invIA );
+	b3Matrix3 iB = b3RotateInertia( stateB->deltaRotation, base->invIB );
 
 	b3Vec3 vA = stateA->linearVelocity;
 	b3Vec3 wA = stateA->angularVelocity;
@@ -468,7 +462,8 @@ void b3SolveSphericalJoint( b3JointSim* base, b3StepContext* context, bool useBi
 		float impulseScale = joint->springSoftness.impulseScale;
 		b3Vec3 cdot = b3Sub( wB, wA );
 
-		b3Vec3 impulse = b3MulSub( b3MulSV( -massScale, b3MulMV( joint->rotationMass, b3Add( cdot, bias ) ) ),
+		b3Matrix3 rotationMass = b3InvertMatrix( b3AddMM( iA, iB ) );
+		b3Vec3 impulse = b3MulSub( b3MulSV( -massScale, b3MulMV( rotationMass, b3Add( cdot, bias ) ) ),
 								   impulseScale, joint->springImpulse );
 		joint->springImpulse = b3Add( joint->springImpulse, impulse );
 
@@ -480,7 +475,8 @@ void b3SolveSphericalJoint( b3JointSim* base, b3StepContext* context, bool useBi
 	{
 		b3Vec3 cdot = b3Sub( wB, wA );
 
-		b3Vec3 lambda = b3Neg( b3MulMV( joint->rotationMass, b3Sub( cdot, joint->motorVelocity ) ) );
+		b3Matrix3 rotationMass = b3InvertMatrix( b3AddMM( iA, iB ) );
+		b3Vec3 lambda = b3Neg( b3MulMV( rotationMass, b3Sub( cdot, joint->motorVelocity ) ) );
 		b3Vec3 newImpulse = b3Add( joint->motorImpulse, lambda );
 		float length = b3Length( newImpulse );
 		float maxImpulse = joint->maxMotorTorque * context->h;

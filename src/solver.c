@@ -1331,6 +1331,8 @@ static void b3SolverTask( void* taskContext )
 			bool useBias = true;
 			for ( int j = 0; j < ITERATIONS; ++j )
 			{
+				b3SolveJoints_Direct( context, j == 0 );
+
 				// Overflow constraints have lower priority. Typically these are dynamic-vs-dynamic.
 				b3SolveJoints_Overflow( context, useBias );
 				b3SolveContacts_Overflow( context, useBias );
@@ -1347,9 +1349,6 @@ static void b3SolverTask( void* taskContext )
 
 			profile->solveImpulses += b3GetMillisecondsAndReset( &ticks );
 
-			// Joint equalities: island LDL / PCG. Sequential impulse in the mixed
-			// stage only does motors, limits, and springs.
-			b3SolveJoints_Direct( context, true );
 			b3FlagJointEventsAfterDirect( context );
 
 			// Integrate positions
@@ -1365,6 +1364,8 @@ static void b3SolverTask( void* taskContext )
 			useBias = false;
 			for ( int j = 0; j < RELAX_ITERATIONS; ++j )
 			{
+				b3SolveJoints_Direct( context, useBias );
+
 				b3SolveJoints_Overflow( context, useBias );
 				b3SolveContacts_Overflow( context, useBias );
 
@@ -1379,8 +1380,6 @@ static void b3SolverTask( void* taskContext )
 			}
 
 			profile->relaxImpulses += b3GetMillisecondsAndReset( &ticks );
-
-			b3SolveJoints_Direct( context, false );
 		}
 
 		// Advance the stage according to the sub-stepping tasks just completed

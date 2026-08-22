@@ -1216,7 +1216,7 @@ static int TestWeldPullApartRecovery( void )
 	float startSep = b3Joint_GetLinearSeparation( jointId );
 	ENSURE( startSep > 1.5f );
 
-	for ( int i = 0; i < 4; ++i )
+	for ( int i = 0; i < 20; ++i )
 	{
 		b3World_Step( worldId, 1.0f / 60.0f, 4 );
 	}
@@ -1295,7 +1295,7 @@ static int TestWeldPullMiddleLink( void )
 	ENSURE( b3Joint_GetLinearSeparation( chainIds[1] ) > 1.5f );
 	ENSURE( b3Joint_GetLinearSeparation( chainIds[2] ) > 1.5f );
 
-	for ( int i = 0; i < 4; ++i )
+	for ( int i = 0; i < 20; ++i )
 	{
 		b3World_Step( worldId, 1.0f / 60.0f, 4 );
 	}

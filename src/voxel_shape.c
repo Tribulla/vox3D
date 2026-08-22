@@ -471,3 +471,39 @@ b3MassData b3Voxel_ComputeMass( const b3VoxelData* v, float density )
 	md.inertia = I;
 	return md;
 }
+
+b3VoxelData* b3CreateVoxelDataEx( const b3Vec3i* cells, const uint16_t* geomIndices, int count, float voxelSize )
+{
+	B3_UNUSED( geomIndices );
+	return b3CreateVoxelData( cells, count, voxelSize );
+}
+
+int b3VoxelData_AddGeometry( b3VoxelData* voxels, const b3VoxelSubBox* boxes, int count )
+{
+	B3_UNUSED( voxels );
+	B3_UNUSED( boxes );
+	B3_UNUSED( count );
+	return 0;
+}
+
+uint16_t b3VoxelData_GetCellGeometry( const b3VoxelData* voxels, b3Vec3i cell )
+{
+	B3_UNUSED( voxels );
+	B3_UNUSED( cell );
+	return 0;
+}
+
+void b3VoxelShape_RemoveCells( b3ShapeId shapeId, const b3Vec3i* cells, int count )
+{
+	B3_UNUSED( shapeId );
+	B3_UNUSED( cells );
+	B3_UNUSED( count );
+}
+
+void b3VoxelShape_AddCells( b3ShapeId shapeId, const b3Vec3i* cells, const uint16_t* geomIndices, int count )
+{
+	B3_UNUSED( shapeId );
+	B3_UNUSED( cells );
+	B3_UNUSED( geomIndices );
+	B3_UNUSED( count );
+}

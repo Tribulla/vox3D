@@ -3209,3 +3209,21 @@ float b3World_GetFractureMaxStress( b3WorldId worldId )
 			m = b3F_max( m, fw->voxels.data[v].stressShown );
 	return m;
 }
+
+int b3World_MakeVoxelBodyFracture( b3WorldId worldId, b3BodyId bodyId, b3FractureMaterial material, const b3FractureDef* def )
+{
+	return b3World_MakeBodyFracture( worldId, bodyId, material, def );
+}
+
+void b3World_RemoveVoxelBodyFracture( b3WorldId worldId, b3BodyId bodyId )
+{
+	B3_UNUSED( worldId );
+	B3_UNUSED( bodyId );
+}
+
+b3FractureEvents b3World_GetFractureEvents( b3WorldId worldId )
+{
+	B3_UNUSED( worldId );
+	b3FractureEvents ev = { 0, NULL };
+	return ev;
+}

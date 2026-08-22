@@ -337,8 +337,8 @@ void b3WarmStartRevoluteJoint( b3JointSim* base, b3StepContext* context )
 
 	float mA = base->invMassA;
 	float mB = base->invMassB;
-	b3Matrix3 iA = base->invIA;
-	b3Matrix3 iB = base->invIB;
+	B3_UNUSED( mA );
+	B3_UNUSED( mB );
 
 	// dummy state for static bodies
 	b3BodyState dummyState = b3_identityBodyState;
@@ -348,34 +348,28 @@ void b3WarmStartRevoluteJoint( b3JointSim* base, b3StepContext* context )
 	b3BodyState* stateA = joint->indexA == B3_NULL_INDEX ? &dummyState : context->states + joint->indexA;
 	b3BodyState* stateB = joint->indexB == B3_NULL_INDEX ? &dummyState : context->states + joint->indexB;
 
-	b3Vec3 vA = stateA->linearVelocity;
+	b3Matrix3 iA = b3RotateInertia( stateA->deltaRotation, base->invIA );
+	b3Matrix3 iB = b3RotateInertia( stateB->deltaRotation, base->invIB );
+
 	b3Vec3 wA = stateA->angularVelocity;
-	b3Vec3 vB = stateB->linearVelocity;
 	b3Vec3 wB = stateB->angularVelocity;
 
-	b3Vec3 rA = b3RotateVector( stateA->deltaRotation, joint->frameA.p );
-	b3Vec3 rB = b3RotateVector( stateB->deltaRotation, joint->frameB.p );
+	b3Quat quatA = b3MulQuat( stateA->deltaRotation, joint->frameA.q );
+	b3Vec3 axisZ = b3RotateVector( quatA, b3Vec3_axisZ );
 
 	float axialImpulse = joint->springImpulse + joint->motorImpulse + joint->lowerImpulse - joint->upperImpulse;
-	b3Vec3 angularImpulse =
-		b3Add( b3MulSV( joint->perpImpulse.x, joint->perpAxisX ), b3MulSV( joint->perpImpulse.y, joint->perpAxisY ) );
-	angularImpulse = b3MulAdd( angularImpulse, axialImpulse, joint->rotationAxisZ );
+	b3Vec3 angularImpulse = b3MulSV( axialImpulse, axisZ );
 
-	vA = b3MulSub( vA, mA, joint->linearImpulse );
-	wA = b3Sub( wA, b3MulMV( iA, b3Add( b3Cross( rA, joint->linearImpulse ), angularImpulse ) ) );
-
-	vB = b3MulAdd( vB, mB, joint->linearImpulse );
-	wB = b3Add( wB, b3MulMV( iB, b3Add( b3Cross( rB, joint->linearImpulse ), angularImpulse ) ) );
+	wA = b3Sub( wA, b3MulMV( iA, angularImpulse ) );
+	wB = b3Add( wB, b3MulMV( iB, angularImpulse ) );
 
 	if ( stateA->flags & b3_dynamicFlag )
 	{
-		stateA->linearVelocity = vA;
 		stateA->angularVelocity = wA;
 	}
 
 	if ( stateB->flags & b3_dynamicFlag )
 	{
-		stateB->linearVelocity = vB;
 		stateB->angularVelocity = wB;
 	}
 }
@@ -386,8 +380,6 @@ void b3SolveRevoluteJoint( b3JointSim* base, b3StepContext* context, bool useBia
 	float mB = base->invMassB;
 	B3_UNUSED( mA );
 	B3_UNUSED( mB );
-	b3Matrix3 iA = base->invIA;
-	b3Matrix3 iB = base->invIB;
 
 	// dummy state for static bodies
 	b3BodyState dummyState = b3_identityBodyState;
@@ -395,6 +387,9 @@ void b3SolveRevoluteJoint( b3JointSim* base, b3StepContext* context, bool useBia
 	b3RevoluteJoint* joint = &base->revoluteJoint;
 	b3BodyState* stateA = joint->indexA == B3_NULL_INDEX ? &dummyState : context->states + joint->indexA;
 	b3BodyState* stateB = joint->indexB == B3_NULL_INDEX ? &dummyState : context->states + joint->indexB;
+
+	b3Matrix3 iA = b3RotateInertia( stateA->deltaRotation, base->invIA );
+	b3Matrix3 iB = b3RotateInertia( stateB->deltaRotation, base->invIB );
 
 	b3Vec3 vA = stateA->linearVelocity;
 	b3Vec3 wA = stateA->angularVelocity;
@@ -412,6 +407,9 @@ void b3SolveRevoluteJoint( b3JointSim* base, b3StepContext* context, bool useBia
 	}
 
 	b3Quat relQ = b3InvMulQuat( quatA, quatB );
+	b3Vec3 axisZ = b3RotateVector( quatA, b3Vec3_axisZ );
+	float axialInvMass = b3Dot( axisZ, b3MulMV( iA, axisZ ) ) + b3Dot( axisZ, b3MulMV( iB, axisZ ) );
+	float axialMass = axialInvMass > 0.0f ? 1.0f / axialInvMass : 0.0f;
 
 	// Solve spring
 	if ( joint->enableSpring && fixedRotation == false )
@@ -424,28 +422,28 @@ void b3SolveRevoluteJoint( b3JointSim* base, b3StepContext* context, bool useBia
 		float bias = joint->springSoftness.biasRate * c;
 		float massScale = joint->springSoftness.massScale;
 		float impulseScale = joint->springSoftness.impulseScale;
-		float cdot = b3Dot( b3Sub( wB, wA ), joint->rotationAxisZ );
+		float cdot = b3Dot( b3Sub( wB, wA ), axisZ );
 
-		float deltaImpulse = -massScale * joint->axialMass * ( cdot + bias ) - impulseScale * joint->springImpulse;
+		float deltaImpulse = -massScale * axialMass * ( cdot + bias ) - impulseScale * joint->springImpulse;
 		joint->springImpulse += deltaImpulse;
 
-		wA = b3MulSub( wA, deltaImpulse, b3MulMV( iA, joint->rotationAxisZ ) );
-		wB = b3MulAdd( wB, deltaImpulse, b3MulMV( iB, joint->rotationAxisZ ) );
+		wA = b3MulSub( wA, deltaImpulse, b3MulMV( iA, axisZ ) );
+		wB = b3MulAdd( wB, deltaImpulse, b3MulMV( iB, axisZ ) );
 	}
 
 	if ( joint->enableMotor && fixedRotation == false )
 	{
-		float cdot = b3Dot( b3Sub( wB, wA ), joint->rotationAxisZ ) - joint->motorSpeed;
+		float cdot = b3Dot( b3Sub( wB, wA ), axisZ ) - joint->motorSpeed;
 
-		float deltaImpulse = -joint->axialMass * cdot;
+		float deltaImpulse = -axialMass * cdot;
 		float newImpulse = joint->motorImpulse + deltaImpulse;
 		float maxImpulse = joint->maxMotorTorque * context->h;
 		newImpulse = b3ClampFloat( newImpulse, -maxImpulse, maxImpulse );
 		deltaImpulse = newImpulse - joint->motorImpulse;
 		joint->motorImpulse = newImpulse;
 
-		wA = b3MulSub( wA, deltaImpulse, b3MulMV( iA, joint->rotationAxisZ ) );
-		wB = b3MulAdd( wB, deltaImpulse, b3MulMV( iB, joint->rotationAxisZ ) );
+		wA = b3MulSub( wA, deltaImpulse, b3MulMV( iA, axisZ ) );
+		wB = b3MulAdd( wB, deltaImpulse, b3MulMV( iB, axisZ ) );
 	}
 
 	if ( joint->enableLimit && fixedRotation == false )
