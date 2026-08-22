@@ -159,6 +159,14 @@ set(SAMPLE_FILES
 
     sample_replay.cpp
 
+    mesh_loader.cpp
+    mesh_loader.h
+
+    sample_joint.cpp
+    sample_benchmark.cpp
+    sample_issues.cpp
+    sample_lift.cpp
+
     sample_voxel.cpp
     sample_stress.cpp
     sample_impact.cpp
