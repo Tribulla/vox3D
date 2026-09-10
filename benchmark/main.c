@@ -152,6 +152,10 @@ int main( int argc, char** argv )
 
 	Benchmark benchmarks[] = {
 		{ "convex_pile", NULL, CreateConvexPile, NULL, NULL, 500 },
+		{ "ccd_bullet_wall", NULL, CreateCcdBulletWall, NULL, NULL, 500 },
+		{ "ccd_many_bullets", NULL, CreateCcdManyBullets, NULL, NULL, 500 },
+		{ "ccd_voxel_wall", NULL, CreateCcdVoxelWall, DestroyCcdVoxelWall, NULL, 500 },
+		{ "ccd_no_candidates", NULL, CreateCcdNoCandidates, NULL, NULL, 500 },
 		{ "joint_grid", NULL, CreateJointGrid, NULL, NULL, 100 },
 		{ "junkyard", NULL, CreateJunkyard, NULL, StepJunkyard, 500 },
 		{ "large_pyramid", NULL, CreateLargePyramid, NULL, NULL, 200 },

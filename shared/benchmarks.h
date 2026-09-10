@@ -42,6 +42,11 @@ void GetWasherCapacity( b3Capacity* capacity );
 void CreateWasher( b3WorldId worldId );
 void CreateConvexPile( b3WorldId worldId );
 void GetConvexPileCapacity( b3Capacity* capacity );
+void CreateCcdBulletWall( b3WorldId worldId );
+void CreateCcdManyBullets( b3WorldId worldId );
+void CreateCcdVoxelWall( b3WorldId worldId );
+void CreateCcdNoCandidates( b3WorldId worldId );
+void DestroyCcdVoxelWall( void );
 
 // void CreateSpinner( b3WorldId worldId );
 // float StepSpinner( b3WorldId worldId, int stepCount );

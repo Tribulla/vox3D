@@ -570,7 +570,14 @@ int b3VoxelCollide( const b3VoxelData* v0, b3Transform xf0, const b3VoxelData* v
 	int cap0 = b3Voxel_GetCellCount( v0 );
 	if ( cap0 > 8192 )
 		cap0 = 8192;
-	b3Vec3i* cells0 = (b3Vec3i*)b3Alloc( (size_t)cap0 * sizeof( b3Vec3i ) );
+	// Most voxel contacts involve small fragments. Keep their query buffer on the
+	// stack to avoid a heap allocation on every narrow-phase call. Large voxel
+	// bodies retain the heap-backed path, bounded by the existing 8192-cell cap.
+	b3Vec3i stackCells0[256];
+	b3Vec3i* cells0 = cap0 <= (int)( sizeof( stackCells0 ) / sizeof( stackCells0[0] ) )
+				  ? stackCells0
+				  : (b3Vec3i*)b3Alloc( (size_t)cap0 * sizeof( b3Vec3i ) );
+	bool heapCells0 = cells0 != stackCells0;
 	int nc0 = b3Voxel_QueryCells( v0, q0, cells0, cap0 );
 
 	b3VoxelContact acc[B3_VOXEL_MAX_CONTACTS];
@@ -608,7 +615,8 @@ int b3VoxelCollide( const b3VoxelData* v0, b3Transform xf0, const b3VoxelData* v
 		}
 	}
 
-	b3Free( cells0, (size_t)cap0 * sizeof( b3Vec3i ) );
+	if ( heapCells0 )
+		b3Free( cells0, (size_t)cap0 * sizeof( b3Vec3i ) );
 
 	b3Voxel_order( acc, nacc );
 	for ( int i = 0; i < nacc; ++i )

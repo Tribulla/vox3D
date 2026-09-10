@@ -7,6 +7,7 @@
 #include "utils.h"
 
 #include "box3d/box3d.h"
+#include "box3d/voxel.h"
 
 #include <assert.h>
 #include <stdlib.h>
@@ -19,6 +20,7 @@
 #endif
 
 static b3ShapeId g_groundShapeId = { 0 };
+static b3VoxelData* g_ccdVoxelWall = NULL;
 
 b3ShapeId GetGroundShapeId( void )
 {
@@ -999,4 +1001,97 @@ void CreateConvexPile( b3WorldId worldId )
 	}
 
 	b3DestroyHull( convex );
+}
+
+// CCD micro-benchmarks. These intentionally keep the projectile setup simple so
+// the measured time is dominated by continuous collision broad-phase and TOI work.
+static void CreateCcdBullet( b3WorldId worldId, b3Pos position, b3Vec3 velocity )
+{
+	b3BodyDef bodyDef = b3DefaultBodyDef();
+	bodyDef.type = b3_dynamicBody;
+	bodyDef.position = position;
+	bodyDef.linearVelocity = velocity;
+	bodyDef.gravityScale = 0.0f;
+	bodyDef.isBullet = true;
+	bodyDef.enableSleep = false;
+
+	b3ShapeDef shapeDef = b3DefaultShapeDef();
+	shapeDef.density = 1.0f;
+	b3Sphere sphere = { { 0.0f, 0.0f, 0.0f }, 0.25f };
+	b3CreateSphereShape( b3CreateBody( worldId, &bodyDef ), &shapeDef, &sphere );
+}
+
+static void CreateCcdThinWall( b3WorldId worldId )
+{
+	b3BodyDef wallDef = b3DefaultBodyDef();
+	wallDef.position = (b3Pos){ 10.0f, 0.0f, 0.0f };
+	b3BodyId wall = b3CreateBody( worldId, &wallDef );
+	b3BoxHull wallHull = b3MakeBoxHull( 0.1f, 20.0f, 20.0f );
+	b3ShapeDef wallShapeDef = b3DefaultShapeDef();
+	b3CreateHullShape( wall, &wallShapeDef, &wallHull.base );
+}
+
+void CreateCcdBulletWall( b3WorldId worldId )
+{
+	CreateCcdThinWall( worldId );
+	CreateCcdBullet( worldId, (b3Pos){ -20.0f, 0.0f, 0.0f }, (b3Vec3){ 600.0f, 0.0f, 0.0f } );
+}
+
+void CreateCcdManyBullets( b3WorldId worldId )
+{
+	CreateCcdThinWall( worldId );
+	int count = BENCHMARK_DEBUG ? 16 : 128;
+	for ( int i = 0; i < count; ++i )
+	{
+		float y = ( (float)( i % 16 ) - 7.5f ) * 1.5f;
+		float z = ( (float)( i / 16 ) - (float)( count / 32 ) ) * 1.5f;
+		CreateCcdBullet( worldId, (b3Pos){ -20.0f, y, z }, (b3Vec3){ 600.0f, 0.0f, 0.0f } );
+	}
+}
+
+void CreateCcdVoxelWall( b3WorldId worldId )
+{
+	int width = BENCHMARK_DEBUG ? 8 : 32;
+	int count = width * width;
+	b3Vec3i* cells = (b3Vec3i*)malloc( (size_t)count * sizeof( b3Vec3i ) );
+	int n = 0;
+	for ( int y = 0; y < width; ++y )
+		for ( int z = 0; z < width; ++z )
+			cells[n++] = (b3Vec3i){ 0, y - width / 2, z - width / 2 };
+
+	g_ccdVoxelWall = b3CreateVoxelData( cells, count, 1.0f );
+	free( cells );
+
+	b3BodyDef wallDef = b3DefaultBodyDef();
+	wallDef.position = (b3Pos){ 10.0f, 0.0f, 0.0f };
+	b3BodyId wall = b3CreateBody( worldId, &wallDef );
+	b3ShapeDef wallShapeDef = b3DefaultShapeDef();
+	b3CreateVoxelShape( wall, &wallShapeDef, g_ccdVoxelWall );
+
+	int bullets = BENCHMARK_DEBUG ? 4 : 32;
+	for ( int i = 0; i < bullets; ++i )
+	{
+		float y = ( (float)( i % 8 ) - 3.5f ) * 2.5f;
+		float z = ( (float)( i / 8 ) - (float)( bullets / 16 ) ) * 2.5f;
+		CreateCcdBullet( worldId, (b3Pos){ -20.0f, y, z }, (b3Vec3){ 600.0f, 0.0f, 0.0f } );
+	}
+}
+
+void DestroyCcdVoxelWall( void )
+{
+	if ( g_ccdVoxelWall != NULL )
+	{
+		b3DestroyVoxelData( g_ccdVoxelWall );
+		g_ccdVoxelWall = NULL;
+	}
+}
+
+void CreateCcdNoCandidates( b3WorldId worldId )
+{
+	int count = BENCHMARK_DEBUG ? 16 : 128;
+	for ( int i = 0; i < count; ++i )
+	{
+		CreateCcdBullet( worldId, (b3Pos){ -20.0f, (float)i * 3.0f, 0.0f },
+			(b3Vec3){ 600.0f, 0.0f, 0.0f } );
+	}
 }

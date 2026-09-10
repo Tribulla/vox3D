@@ -404,6 +404,10 @@ typedef struct b3ContinuousContext
 	b3World* world;
 	b3BodySim* fastBodySim;
 	b3Shape* fastShape;
+	b3Transform fastXf1;
+	b3Transform fastXf2;
+	b3AABB fastBox1;
+	b3AABB fastBox2;
 	b3Vec3 centroid1, centroid2;
 	b3Sweep sweep;
 	// World base for re-centering sweeps. Keeps TOI in float precision far from the origin.
@@ -419,6 +423,27 @@ typedef struct b3ContinuousContext
 	int pushBackIterations;
 	int rootIterations;
 } b3ContinuousContext;
+
+static bool b3CcdAABBMovingAway( b3AABB start, b3AABB end, b3AABB target )
+{
+	for ( int axis = 0; axis < 3; ++axis )
+	{
+		float startLower = ( &start.lowerBound.x )[axis];
+		float startUpper = ( &start.upperBound.x )[axis];
+		float endLower = ( &end.lowerBound.x )[axis];
+		float endUpper = ( &end.upperBound.x )[axis];
+		float targetLower = ( &target.lowerBound.x )[axis];
+		float targetUpper = ( &target.upperBound.x )[axis];
+
+		// Both endpoint boxes remain on one side of the target and the
+		// separating face moves farther away during the sweep.
+		if ( startLower > targetUpper && endLower >= startLower )
+			return true;
+		if ( startUpper < targetLower && endUpper <= startUpper )
+			return true;
+	}
+	return false;
+}
 
 // This is called from b3DynamicTree_Query for continuous collision
 static bool b3ContinuousQueryCallback( int proxyId, uint64_t userData, void* context )
@@ -464,6 +489,23 @@ static bool b3ContinuousQueryCallback( int proxyId, uint64_t userData, void* con
 	}
 
 	b3Body* body = b3Array_Get( world->bodies, shape->bodyId );
+
+	// The broad-phase query uses fat proxies, so it can visit static shapes whose
+	// actual geometry is not in the fast shape's swept AABB. Reject those cheaply
+	// before entering the TOI solver. This is exact for static bodies because the
+	// target cannot move during the sweep.
+	if ( body->type == b3_staticBody )
+	{
+		b3AABB sweptBox = b3AABB_Union( continuousContext->fastBox1, continuousContext->fastBox2 );
+		b3Quat q1 = continuousContext->fastXf1.q;
+		b3Quat q2 = continuousContext->fastXf2.q;
+		float rotationAlignment = b3AbsFloat( b3DotQuat( q1, q2 ) );
+		if ( ( rotationAlignment > 1.0f - 1e-6f && b3CcdAABBMovingAway( continuousContext->fastBox1,
+			continuousContext->fastBox2, shape->aabb ) ) || b3AABB_Overlaps( sweptBox, shape->aabb ) == false )
+		{
+			return true;
+		}
+	}
 
 	b3BodySim* bodySim = b3GetBodySim( world, body );
 	B3_ASSERT( body->type == b3_staticBody || ( fastBodySim->flags & b3_isBullet ) );
@@ -632,12 +674,16 @@ static void b3SolveContinuous( b3World* world, int bodySimIndex, b3TaskContext* 
 		shapeId = fastShape->nextShapeId;
 
 		context.fastShape = fastShape;
-		context.centroid1 = b3TransformPoint( xf1, fastShape->localCentroid );
-		context.centroid2 = b3TransformPoint( xf2, fastShape->localCentroid );
+		context.fastXf1 = xf1;
+		context.fastXf2 = xf2;
+		context.centroid1 = b3TransformPoint( context.fastXf1, fastShape->localCentroid );
+		context.centroid2 = b3TransformPoint( context.fastXf2, fastShape->localCentroid );
 
 		b3AABB box1 = fastShape->aabb;
 		// xf2 is relative to the base, so translate the box back to world space, rounding outward
 		b3AABB box2 = b3OffsetAABB( b3ComputeShapeAABB( fastShape, xf2 ), base );
+		context.fastBox1 = box1;
+		context.fastBox2 = box2;
 
 		// Store this to avoid double computation in the case there is no impact event
 		fastShape->aabb = box2;
@@ -653,7 +699,12 @@ static void b3SolveContinuous( b3World* world, int bodySimIndex, b3TaskContext* 
 			continue;
 		}
 
-		b3AABB sweptBox = b3AABB_Union( box1, box2 );
+		// Only query the portion of the sweep before the earliest impact found so
+		// far. This also makes the later kinematic/dynamic passes cheaper after a
+		// static hit has already been found.
+		b3Vec3 fractionBoxLower = b3Lerp( box1.lowerBound, box2.lowerBound, context.fraction );
+		b3Vec3 fractionBoxUpper = b3Lerp( box1.upperBound, box2.upperBound, context.fraction );
+		b3AABB sweptBox = b3AABB_Union( box1, (b3AABB){ fractionBoxLower, fractionBoxUpper } );
 		b3DynamicTree_Query( staticTree, sweptBox, B3_DEFAULT_MASK_BITS, false, b3ContinuousQueryCallback, &context );
 
 		if ( isBullet )
