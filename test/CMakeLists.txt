@@ -16,6 +16,8 @@ set(BOX3D_TEST_FILES
     test_hull.c
     test_id.c
     test_joint.c
+    test_joint_recovery.c
+    test_joint_regression.c
     test_large_world.c
     test_lift.c
     test_macros.h

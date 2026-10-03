@@ -73,6 +73,7 @@ typedef enum b3SolverStageType
 	b3_stagePrepareContacts,
 	b3_stageIntegrateVelocities,
 	b3_stageWarmStart,
+	b3_stageSolveJointMotors,
 	b3_stageSolve,
 	b3_stageIntegratePositions,
 	b3_stageRelax,
@@ -234,6 +235,7 @@ typedef struct b3StepContext
 	b3SolverStage* stages;
 	int stageCount;
 	bool enableWarmStarting;
+	bool enableJointMotorProjection;
 
 	// padding to prevent false sharing
 	char padding1[64];

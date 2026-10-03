@@ -1630,7 +1630,24 @@ void b3WarmStartJoints_Overflow( b3StepContext* context )
 	b3TracyCZoneEnd( prepare_joints );
 }
 
-void b3SolveJoints_Overflow( b3StepContext* context, bool useBias )
+bool b3JointNeedsMotorProjection( const b3JointSim* joint )
+{
+	switch ( joint->type )
+	{
+		case b3_motorJoint:
+			return true;
+		case b3_revoluteJoint:
+			return joint->revoluteJoint.enableMotor && joint->revoluteJoint.maxMotorTorque > 0.0f &&
+				   ( joint->revoluteJoint.enableSpring == false || joint->revoluteJoint.hertz == 0.0f );
+		case b3_prismaticJoint:
+			return joint->prismaticJoint.enableMotor && joint->prismaticJoint.maxMotorForce > 0.0f &&
+				   ( joint->prismaticJoint.enableSpring == false || joint->prismaticJoint.hertz == 0.0f );
+		default:
+			return false;
+	}
+}
+
+void b3SolveJoints_Overflow( b3StepContext* context, bool useBias, bool beforeDirect )
 {
 	b3TracyCZoneNC( solve_joints, "SolveJoints", b3_colorLemonChiffon, true );
 
@@ -1641,6 +1658,10 @@ void b3SolveJoints_Overflow( b3StepContext* context, bool useBias )
 	for ( int i = 0; i < jointCount; ++i )
 	{
 		b3JointSim* joint = joints + i;
+		if ( useBias && b3JointNeedsMotorProjection( joint ) != beforeDirect )
+		{
+			continue;
+		}
 		b3SolveJoint( joint, context, useBias );
 	}
 

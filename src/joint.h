@@ -385,7 +385,8 @@ void b3SolveJoint( b3JointSim* joint, b3StepContext* context, bool useBias );
 
 void b3PrepareJoints_Overflow( b3StepContext* context );
 void b3WarmStartJoints_Overflow( b3StepContext* context );
-void b3SolveJoints_Overflow( b3StepContext* context, bool useBias );
+bool b3JointNeedsMotorProjection( const b3JointSim* joint );
+void b3SolveJoints_Overflow( b3StepContext* context, bool useBias, bool beforeDirect );
 
 void b3GetJointReaction( b3World* world, b3JointSim* sim, float invTimeStep, float* force, float* torque );
 

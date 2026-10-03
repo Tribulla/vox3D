@@ -61,8 +61,21 @@ typedef struct b3ObbSat
 	bool separated;
 } b3ObbSat;
 
+typedef struct b3VoxelFaceFilter
+{
+	const b3VoxelData* v0;
+	const b3VoxelData* v1;
+	b3Vec3i cell0;
+	b3Vec3i cell1;
+	b3Transform xf0;
+	b3Transform xf1;
+} b3VoxelFaceFilter;
+
+static bool b3Voxel_facesExposed( const b3VoxelData* v0, b3Vec3i cell0, b3Transform xf0, const b3VoxelData* v1,
+								   b3Vec3i cell1, b3Transform xf1, b3Vec3 normalWorld );
+
 static bool b3Obb_testAxis( b3ObbSat* sat, const b3VoxelOBB* o0, const b3VoxelOBB* o1, b3Vec3 delta, b3Vec3 a, int srcBox,
-							bool isEdge, float contactDist )
+							bool isEdge, float contactDist, const b3VoxelFaceFilter* filter )
 {
 	float lenSq = b3Dot( a, a );
 	float gate = isEdge ? 1e-4f : 1e-10f;
@@ -92,14 +105,17 @@ static bool b3Obb_testAxis( b3ObbSat* sat, const b3VoxelOBB* o0, const b3VoxelOB
 		}
 	}
 
+	b3Vec3 normal = ( proj >= 0.0f ) ? a : b3Neg( a );
 	bool improve = isEdge ? ( overlap + 1e-4f < sat->minOverlap ) : ( overlap < sat->minOverlap + 1e-4f );
-	if ( improve )
-	{
-		sat->minOverlap = overlap;
-		sat->minAxis = ( proj >= 0.0f ) ? a : b3Neg( a );
-		sat->srcBox = srcBox;
-		sat->isEdge = isEdge;
-	}
+	if ( !improve )
+		return true;
+	if ( filter && !b3Voxel_facesExposed( filter->v0, filter->cell0, filter->xf0,
+			filter->v1, filter->cell1, filter->xf1, normal ) )
+		return true;
+	sat->minOverlap = overlap;
+	sat->minAxis = normal;
+	sat->srcBox = srcBox;
+	sat->isEdge = isEdge;
 	return true;
 }
 
@@ -198,7 +214,8 @@ static int b3Obb_reduce( const b3VoxelContact* cand, int ncand, int maxContacts,
 	return nsel;
 }
 
-int b3VoxelCollideOBB( const b3VoxelOBB* o0, const b3VoxelOBB* o1, float contactDistance, int maxContacts, b3VoxelContact* out )
+static int b3VoxelCollideOBBFiltered( const b3VoxelOBB* o0, const b3VoxelOBB* o1, float contactDistance,
+		int maxContacts, b3VoxelContact* out, const b3VoxelFaceFilter* filter )
 {
 	if ( maxContacts < 1 )
 		return 0;
@@ -209,15 +226,15 @@ int b3VoxelCollideOBB( const b3VoxelOBB* o0, const b3VoxelOBB* o1, float contact
 	b3ObbSat sat = { FLT_MAX, { 0.0f, 0.0f, 1.0f }, 0, false, 0, { 0.0f, 0.0f, 0.0f }, false };
 
 	for ( int i = 0; i < 3; ++i )
-		if ( !b3Obb_testAxis( &sat, o0, o1, delta, o0->axes[i], 0, false, contactDistance ) )
+		if ( !b3Obb_testAxis( &sat, o0, o1, delta, o0->axes[i], 0, false, contactDistance, filter ) )
 			return 0;
 	for ( int i = 0; i < 3; ++i )
-		if ( !b3Obb_testAxis( &sat, o0, o1, delta, o1->axes[i], 1, false, contactDistance ) )
+		if ( !b3Obb_testAxis( &sat, o0, o1, delta, o1->axes[i], 1, false, contactDistance, filter ) )
 			return 0;
 	// 9 edge-edge cross axes.
 	for ( int i = 0; i < 3; ++i )
 		for ( int j = 0; j < 3; ++j )
-			if ( !b3Obb_testAxis( &sat, o0, o1, delta, b3Cross( o0->axes[i], o1->axes[j] ), 0, true, contactDistance ) )
+			if ( !b3Obb_testAxis( &sat, o0, o1, delta, b3Cross( o0->axes[i], o1->axes[j] ), 0, true, contactDistance, filter ) )
 				return 0;
 
 	if ( sat.minOverlap == FLT_MAX )
@@ -319,6 +336,11 @@ int b3VoxelCollideOBB( const b3VoxelOBB* o0, const b3VoxelOBB* o1, float contact
 	}
 
 	return b3Obb_reduce( cand, ncand, maxContacts, out );
+}
+
+int b3VoxelCollideOBB( const b3VoxelOBB* o0, const b3VoxelOBB* o1, float contactDistance, int maxContacts, b3VoxelContact* out )
+{
+	return b3VoxelCollideOBBFiltered( o0, o1, contactDistance, maxContacts, out, NULL );
 }
 
 int b3VoxelCollideAABB( const b3AABB* a0, const b3AABB* a1, float contactDistance, int maxContacts, b3VoxelContact* out )
@@ -597,11 +619,10 @@ int b3VoxelCollide( const b3VoxelData* v0, b3Transform xf0, const b3VoxelData* v
 			// collapses to one central point with ZERO base -> free to rock/tip. The clipped
 			// corners reach the true face edges, restoring a full-width support base. Edge and
 			// deep-overlap contacts still fall back to the single-point branch inside CollideOBB.
-			int nc = b3VoxelCollideOBB( &obb0, &obb1, contactDistance, 4, c );
+			b3VoxelFaceFilter filter = { v0, v1, cells0[a], cells1[b], xf0, xf1 };
+			int nc = b3VoxelCollideOBBFiltered( &obb0, &obb1, contactDistance, 4, c, &filter );
 			for ( int k = 0; k < nc; ++k )
 			{
-				if ( !b3Voxel_facesExposed( v0, cells0[a], xf0, v1, cells1[b], xf1, c[k].normal ) )
-					continue;
 				c[k].featureId = b3Voxel_pairId( cells0[a], cells1[b], k );
 				b3Voxel_addReduced( &c[k], acc, &nacc, maxContacts );
 			}

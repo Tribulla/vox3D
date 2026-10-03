@@ -163,6 +163,7 @@ set(SAMPLE_FILES
     mesh_loader.h
 
     sample_joint.cpp
+    sample_joint_rigidity.cpp
     sample_benchmark.cpp
     sample_issues.cpp
     sample_lift.cpp

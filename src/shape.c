@@ -1411,6 +1411,38 @@ static void b3ResetProxy( b3World* world, b3Shape* shape, bool wakeBodies, bool 
 	b3ValidateSolverSets( world );
 }
 
+static void b3RefreshVoxelShape( b3World* world, b3Shape* shape )
+{
+	world->locked = true;
+	shape->aabbMargin = b3ComputeShapeMargin( shape );
+	b3ResetProxy( world, shape, true, true );
+	b3Body* body = b3Array_Get( world->bodies, shape->bodyId );
+	b3WakeBody( world, body );
+	b3UpdateBodyMassData( world, body );
+	world->locked = false;
+}
+
+void b3VoxelShape_RemoveCells( b3ShapeId shapeId, const b3Vec3i* cells, int count )
+{
+	b3World* world = b3GetUnlockedWorld( shapeId.world0 );
+	if ( world == NULL ) return;
+	b3Shape* shape = b3GetShape( world, shapeId );
+	B3_ASSERT( shape->type == b3_voxelShape );
+	if ( b3Voxel_RemoveCells( (b3VoxelData*)shape->voxel, cells, count ) )
+		b3RefreshVoxelShape( world, shape );
+}
+
+void b3VoxelShape_AddCells( b3ShapeId shapeId, const b3Vec3i* cells, const uint16_t* geomIndices, int count )
+{
+	B3_UNUSED( geomIndices );
+	b3World* world = b3GetUnlockedWorld( shapeId.world0 );
+	if ( world == NULL ) return;
+	b3Shape* shape = b3GetShape( world, shapeId );
+	B3_ASSERT( shape->type == b3_voxelShape );
+	if ( b3Voxel_AddCells( (b3VoxelData*)shape->voxel, cells, count ) )
+		b3RefreshVoxelShape( world, shape );
+}
+
 void b3Shape_SetFilter( b3ShapeId shapeId, b3Filter filter, bool invokeContacts )
 {
 	b3World* world = b3GetUnlockedWorld( shapeId.world0 );

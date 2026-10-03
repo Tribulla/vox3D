@@ -220,6 +220,141 @@ static void b3IntegrateVelocitiesTask( b3SolverBlock block, b3StepContext* conte
 	b3TracyCZoneEnd( integrate_velocity );
 }
 
+static bool b3JointMotionNeedsProjection( const b3StepContext* context )
+{
+	int jointCount = 0;
+	bool hasLateConstraints = false;
+	for ( int i = 0; i < B3_GRAPH_COLOR_COUNT; ++i )
+	{
+		jointCount += context->graph->colors[i].jointSims.count;
+		hasLateConstraints |= context->graph->colors[i].convexContacts.count > 0 || context->graph->colors[i].contacts.count > 0;
+	}
+	if ( jointCount == 0 )
+	{
+		return false;
+	}
+	float maxAngularSpeed = B3_MAX_ROTATION * context->inv_dt;
+	float maxAngularSpeedSquared = maxAngularSpeed * maxAngularSpeed;
+	float maxLinearSpeedSquared = context->maxLinearVelocity * context->maxLinearVelocity;
+	int bodyCount = context->world->solverSets.data[b3_awakeSet].bodyStates.count;
+	for ( int i = 0; i < bodyCount; ++i )
+	{
+		const b3BodyState* state = context->states + i;
+		if ( ( state->flags & b3_dynamicFlag ) == 0 ||
+			 context->world->bodies.data[context->sims[i].bodyId].headJointKey == B3_NULL_INDEX )
+		{
+			continue;
+		}
+		if ( ( state->flags & b3_isSpeedCapped ) != 0 || b3LengthSquared( state->linearVelocity ) > maxLinearSpeedSquared ||
+			 ( b3LengthSquared( state->angularVelocity ) > maxAngularSpeedSquared &&
+			   ( state->flags & b3_allowFastRotation ) == 0 ) )
+		{
+			return true;
+		}
+	}
+
+	if ( hasLateConstraints == false )
+	{
+		for ( int colorIndex = 0; colorIndex < B3_GRAPH_COLOR_COUNT && hasLateConstraints == false; ++colorIndex )
+		{
+			const b3GraphColor* color = context->graph->colors + colorIndex;
+			for ( int i = 0; i < color->jointSims.count && hasLateConstraints == false; ++i )
+			{
+				const b3JointSim* joint = color->jointSims.data + i;
+				if ( b3JointNeedsMotorProjection( joint ) )
+				{
+					continue;
+				}
+				switch ( joint->type )
+				{
+					case b3_sphericalJoint:
+						hasLateConstraints = joint->sphericalJoint.enableSpring || joint->sphericalJoint.enableMotor ||
+											 joint->sphericalJoint.enableConeLimit || joint->sphericalJoint.enableTwistLimit;
+						break;
+					case b3_weldJoint:
+						hasLateConstraints = joint->weldJoint.linearHertz > 0.0f || joint->weldJoint.angularHertz > 0.0f;
+						break;
+					default:
+						hasLateConstraints = true;
+						break;
+				}
+			}
+		}
+	}
+	if ( hasLateConstraints == false && jointCount > B3_JOINT_LDL_MAX_ROWS / 6 )
+	{
+		return false;
+	}
+	const float maxAnchorSpeed = 0.001f * context->inv_h;
+	for ( int colorIndex = 0; colorIndex < B3_GRAPH_COLOR_COUNT; ++colorIndex )
+	{
+		const b3GraphColor* color = context->graph->colors + colorIndex;
+		for ( int i = 0; i < color->jointSims.count; ++i )
+		{
+			const b3JointSim* joint = color->jointSims.data + i;
+			int indexA, indexB;
+			b3Vec3 anchorA, anchorB, deltaCenter;
+			switch ( joint->type )
+			{
+				case b3_sphericalJoint:
+					indexA = joint->sphericalJoint.indexA;
+					indexB = joint->sphericalJoint.indexB;
+					anchorA = joint->sphericalJoint.frameA.p;
+					anchorB = joint->sphericalJoint.frameB.p;
+					deltaCenter = joint->sphericalJoint.deltaCenter;
+					break;
+				case b3_revoluteJoint:
+					indexA = joint->revoluteJoint.indexA;
+					indexB = joint->revoluteJoint.indexB;
+					anchorA = joint->revoluteJoint.frameA.p;
+					anchorB = joint->revoluteJoint.frameB.p;
+					deltaCenter = joint->revoluteJoint.deltaCenter;
+					break;
+				case b3_weldJoint:
+					if ( joint->weldJoint.linearHertz > 0.0f )
+					{
+						continue;
+					}
+					indexA = joint->weldJoint.indexA;
+					indexB = joint->weldJoint.indexB;
+					anchorA = joint->weldJoint.frameA.p;
+					anchorB = joint->weldJoint.frameB.p;
+					deltaCenter = joint->weldJoint.deltaCenter;
+					break;
+				default:
+					continue;
+			}
+			const b3BodyState dummyState = b3_identityBodyState;
+			const b3BodyState* stateA = indexA == B3_NULL_INDEX ? &dummyState : context->states + indexA;
+			const b3BodyState* stateB = indexB == B3_NULL_INDEX ? &dummyState : context->states + indexB;
+			b3Vec3 rA = b3RotateVector( stateA->deltaRotation, anchorA );
+			b3Vec3 rB = b3RotateVector( stateB->deltaRotation, anchorB );
+			b3Vec3 separation = b3Add( deltaCenter, b3Add( b3Sub( stateB->deltaPosition, stateA->deltaPosition ), b3Sub( rB, rA ) ) );
+			if ( b3LengthSquared( separation ) > 0.002f * 0.002f )
+			{
+				return true;
+			}
+			b3Quat nextRotationA = b3IntegrateRotation( stateA->deltaRotation, b3MulSV( context->h, stateA->angularVelocity ) );
+			b3Quat nextRotationB = b3IntegrateRotation( stateB->deltaRotation, b3MulSV( context->h, stateB->angularVelocity ) );
+			b3Vec3 nextSeparation = b3MulAdd( b3Add( deltaCenter, b3Sub( stateB->deltaPosition, stateA->deltaPosition ) ),
+											 context->h, b3Sub( stateB->linearVelocity, stateA->linearVelocity ) );
+			nextSeparation = b3Add( nextSeparation, b3Sub( b3RotateVector( nextRotationB, anchorB ),
+															b3RotateVector( nextRotationA, anchorA ) ) );
+			if ( b3LengthSquared( nextSeparation ) > 0.002f * 0.002f )
+			{
+				return true;
+			}
+			b3Vec3 velocityA = b3Add( stateA->linearVelocity, b3Cross( stateA->angularVelocity, rA ) );
+			b3Vec3 velocityB = b3Add( stateB->linearVelocity, b3Cross( stateB->angularVelocity, rB ) );
+			if ( b3LengthSquared( b3Sub( velocityB, velocityA ) ) > maxAnchorSpeed * maxAnchorSpeed )
+			{
+				return true;
+			}
+		}
+	}
+	return false;
+}
+
 static void b3IntegratePositionsTask( b3SolverBlock block, b3StepContext* context )
 {
 	b3TracyCZoneNC( integrate_positions, "IntPos", b3_colorDarkSeaGreen, true );
@@ -327,7 +462,7 @@ static void b3WarmStartJointsTask( b3SolverBlock block, b3StepContext* context )
 	b3TracyCZoneEnd( warm_joints );
 }
 
-static void b3SolveJointsTask( b3SolverBlock block, b3StepContext* context, bool useBias, int workerIndex )
+static void b3SolveJointsTask( b3SolverBlock block, b3StepContext* context, bool useBias, bool beforeDirect, int workerIndex )
 {
 	b3TracyCZoneNC( solve_joints, "SolveJoints", b3_colorLemonChiffon, true );
 
@@ -341,9 +476,13 @@ static void b3SolveJointsTask( b3SolverBlock block, b3StepContext* context, bool
 	for ( int i = block.startIndex; i < block.startIndex + block.count; ++i )
 	{
 		b3JointSim* joint = joints + i;
+		if ( useBias && b3JointNeedsMotorProjection( joint ) != beforeDirect )
+		{
+			continue;
+		}
 		b3SolveJoint( joint, context, useBias );
 
-		if ( useBias && ( joint->forceThreshold < FLT_MAX || joint->torqueThreshold < FLT_MAX ) &&
+		if ( useBias && beforeDirect == false && ( joint->forceThreshold < FLT_MAX || joint->torqueThreshold < FLT_MAX ) &&
 			 b3GetBit( jointStateBitSet, joint->jointId ) == false )
 		{
 			float force, torque;
@@ -1131,11 +1270,18 @@ static void b3ExecuteBlock( b3SolverStage* stage, b3StepContext* context, b3Solv
 			}
 			break;
 
+		case b3_stageSolveJointMotors:
+			if ( blockType == b3_graphJointBlock )
+			{
+				b3SolveJointsTask( block, context, true, true, workerIndex );
+			}
+			break;
+
 		case b3_stageSolve:
 			if ( blockType == b3_graphJointBlock )
 			{
 				bool useBias = true;
-				b3SolveJointsTask( block, context, useBias, workerIndex );
+				b3SolveJointsTask( block, context, useBias, false, workerIndex );
 			}
 			else if ( blockType == b3_graphWideContactBlock )
 			{
@@ -1157,7 +1303,7 @@ static void b3ExecuteBlock( b3SolverStage* stage, b3StepContext* context, b3Solv
 			if ( blockType == b3_graphJointBlock )
 			{
 				bool useBias = false;
-				b3SolveJointsTask( block, context, useBias, workerIndex );
+				b3SolveJointsTask( block, context, useBias, false, workerIndex );
 			}
 			else if ( blockType == b3_graphWideContactBlock )
 			{
@@ -1396,12 +1542,23 @@ static void b3SolverTask( void* taskContext )
 			bool useBias = true;
 			for ( int j = 0; j < ITERATIONS; ++j )
 			{
-				b3SolveJoints_Direct( context, j == 0 );
+				if ( context->enableJointMotorProjection )
+				{
+					b3SolveJoints_Overflow( context, useBias, true );
+					for ( int colorIndex = 0; colorIndex < activeColorCount; ++colorIndex )
+					{
+						syncBits = ( graphSyncIndex << 16 ) | iterationStageIndex;
+						B3_ASSERT( stages[iterationStageIndex].type == b3_stageSolveJointMotors );
+						b3ExecuteMainStage( stages + iterationStageIndex, context, syncBits );
+						iterationStageIndex += 1;
+					}
+					graphSyncIndex += 1;
+				}
+				b3SolveJoints_Direct( context, j == 0, j == 0 );
 
-				// Overflow constraints have lower priority. Typically these are dynamic-vs-dynamic.
-				b3SolveJoints_Overflow( context, useBias );
+				// Solve normal contacts after the equality pass to retain support.
+				b3SolveJoints_Overflow( context, useBias, false );
 				b3SolveContacts_Overflow( context, useBias );
-
 				for ( int colorIndex = 0; colorIndex < activeColorCount; ++colorIndex )
 				{
 					syncBits = ( graphSyncIndex << 16 ) | iterationStageIndex;
@@ -1412,8 +1569,15 @@ static void b3SolverTask( void* taskContext )
 				graphSyncIndex += 1;
 			}
 
+			// A strong impact can add motion after the hard joint solve that
+			// would be capped independently by the integrator. Project it back
+			// through the articulation before that cap tears its anchors apart.
+			bool projectJointPositions = b3JointMotionNeedsProjection( context );
+			if ( projectJointPositions )
+			{
+				b3SolveJoints_Direct( context, true, false );
+			}
 			profile->solveImpulses += b3GetMillisecondsAndReset( &ticks );
-
 			b3FlagJointEventsAfterDirect( context );
 
 			// Integrate positions
@@ -1423,15 +1587,18 @@ static void b3SolverTask( void* taskContext )
 			iterationStageIndex += 1;
 			bodySyncIndex += 1;
 
+			if ( projectJointPositions )
+			{
+				b3ProjectJointPositions( context );
+			}
 			profile->integratePositions += b3GetMillisecondsAndReset( &ticks );
 
 			// Relax constraints
 			useBias = false;
 			for ( int j = 0; j < RELAX_ITERATIONS; ++j )
 			{
-				b3SolveJoints_Direct( context, useBias );
-
-				b3SolveJoints_Overflow( context, useBias );
+				b3SolveJoints_Direct( context, useBias, false );
+				b3SolveJoints_Overflow( context, useBias, false );
 				b3SolveContacts_Overflow( context, useBias );
 
 				for ( int colorIndex = 0; colorIndex < activeColorCount; ++colorIndex )
@@ -1449,7 +1616,9 @@ static void b3SolverTask( void* taskContext )
 
 		// Advance the stage according to the sub-stepping tasks just completed
 		// integrate velocities / warm start / solve / integrate positions / relax
-		stageIndex += 1 + activeColorCount + ITERATIONS * activeColorCount + 1 + RELAX_ITERATIONS * activeColorCount;
+		int solveStageCount = context->enableJointMotorProjection ? 2 : 1;
+		stageIndex += 1 + activeColorCount + solveStageCount * ITERATIONS * activeColorCount + 1 +
+					  RELAX_ITERATIONS * activeColorCount;
 
 		// Restitution
 		{
@@ -1685,6 +1854,19 @@ void b3Solve( b3World* world, b3StepContext* stepContext )
 		}
 		activeColorCount = c;
 
+		bool enableJointMotorProjection = false;
+		for ( int i = 0; i < B3_GRAPH_COLOR_COUNT && enableJointMotorProjection == false; ++i )
+		{
+			for ( int j = 0; j < colors[i].jointSims.count; ++j )
+			{
+				if ( b3JointNeedsMotorProjection( colors[i].jointSims.data + j ) )
+				{
+					enableJointMotorProjection = true;
+					break;
+				}
+			}
+		}
+
 		// Prepare and store run as one flat parallel-for over the entire wide constraint range,
 		// partitioned into uniformly sized blocks. Color info is consulted inside the task via
 		// a small span array, so blocks do not need to honor color boundaries here.
@@ -1823,7 +2005,7 @@ void b3Solve( b3World* world, b3StepContext* stepContext )
 		// b3_stageWarmStart
 		stageCount += activeColorCount;
 		// b3_stageSolve
-		stageCount += ITERATIONS * activeColorCount;
+		stageCount += ( enableJointMotorProjection ? 2 : 1 ) * ITERATIONS * activeColorCount;
 		// b3_stageIntegratePositions
 		stageCount += 1;
 		// b3_stageRelax
@@ -1908,8 +2090,16 @@ void b3Solve( b3World* world, b3StepContext* stepContext )
 		stage = b3InitStage( stage, b3_stageIntegrateVelocities, bodyBlocks, bodyDim.count, UINT8_MAX );
 		stage = b3InitColorStages( stage, b3_stageWarmStart, 1, activeColorCount, graphColorBlocks, graphBlockCounts,
 								   activeColorIndices );
-		stage = b3InitColorStages( stage, b3_stageSolve, ITERATIONS, activeColorCount, graphColorBlocks, graphBlockCounts,
-								   activeColorIndices );
+		for ( int i = 0; i < ITERATIONS; ++i )
+		{
+			if ( enableJointMotorProjection )
+			{
+				stage = b3InitColorStages( stage, b3_stageSolveJointMotors, 1, activeColorCount, graphColorBlocks, graphBlockCounts,
+										   activeColorIndices );
+			}
+			stage = b3InitColorStages( stage, b3_stageSolve, 1, activeColorCount, graphColorBlocks, graphBlockCounts,
+									   activeColorIndices );
+		}
 		stage = b3InitStage( stage, b3_stageIntegratePositions, bodyBlocks, bodyDim.count, UINT8_MAX );
 		stage = b3InitColorStages( stage, b3_stageRelax, RELAX_ITERATIONS, activeColorCount, graphColorBlocks, graphBlockCounts,
 								   activeColorIndices );
@@ -1925,6 +2115,7 @@ void b3Solve( b3World* world, b3StepContext* stepContext )
 		b3WorkerContext workerContext[B3_MAX_WORKERS];
 
 		stepContext->graph = graph;
+		stepContext->enableJointMotorProjection = enableJointMotorProjection;
 		stepContext->activeColorCount = activeColorCount;
 		stepContext->workerCount = workerCount;
 		stepContext->stageCount = stageCount;

@@ -14,19 +14,18 @@
 #include <stdlib.h>
 #include <string.h>
 
-#define B3_JOINT_LDL_MAX_ROWS 512
 #define B3_JOINT_DIAG_EPS 1.0e-8f
 #define B3_JOINT_CFM_TREE 1.0e-6f
+#define B3_JOINT_POSITION_CFM 1.0e-2f
 #define B3_JOINT_BAUMGARTE 0.2f
 #define B3_JOINT_MAX_LINEAR_BIAS 10.0f
 #define B3_JOINT_MAX_ANGULAR_BIAS 10.0f
 #define B3_JOINT_LINEAR_SLOP 0.0005f
 #define B3_JOINT_ANGULAR_SLOP 0.001f
-#define B3_JOINT_MAX_SPEED 200.0f
 
 typedef struct b3PairOrd
 {
-	float score;
+	int key;
 	int index;
 } b3PairOrd;
 
@@ -34,13 +33,13 @@ static int b3ComparePairOrd( const void* a, const void* b )
 {
 	const b3PairOrd* pa = (const b3PairOrd*)a;
 	const b3PairOrd* pb = (const b3PairOrd*)b;
-	if ( pa->score < pb->score )
-	{
-		return 1;
-	}
-	if ( pa->score > pb->score )
+	if ( pa->key < pb->key )
 	{
 		return -1;
+	}
+	if ( pa->key > pb->key )
+	{
+		return 1;
 	}
 	return pa->index - pb->index;
 }
@@ -68,11 +67,10 @@ typedef struct b3JointRow
 	b3Vec3 jAngB;
 	float invMassA;
 	float invMassB;
-	b3Matrix3 invIA;
-	b3Matrix3 invIB;
+	b3Vec3 massAngA;
+	b3Vec3 massAngB;
 	float rhs;
-	float posErr;
-	float cfmRel;
+	float bias;
 	float* lambda;
 } b3JointRow;
 
@@ -122,12 +120,12 @@ static void b3UfUnion( int* parent, int* rank, int a, int b )
 	}
 }
 
-static void b3FillRowMass( b3JointRow* row, const b3JointSim* base, const b3BodyState* stateA, const b3BodyState* stateB )
+static void b3FillRowMass( b3JointRow* row, const b3JointSim* base, const b3Matrix3* invInertias )
 {
 	row->invMassA = base->invMassA;
 	row->invMassB = base->invMassB;
-	row->invIA = b3RotateInertia( stateA->deltaRotation, base->invIA );
-	row->invIB = b3RotateInertia( stateB->deltaRotation, base->invIB );
+	row->massAngA = row->indexA == B3_NULL_INDEX ? b3Vec3_zero : b3MulMV( invInertias[row->indexA], row->jAngA );
+	row->massAngB = row->indexB == B3_NULL_INDEX ? b3Vec3_zero : b3MulMV( invInertias[row->indexB], row->jAngB );
 }
 
 static b3JointRow* b3PushRow( b3JointRow* rows, int* count, int capacity )
@@ -140,7 +138,29 @@ static b3JointRow* b3PushRow( b3JointRow* rows, int* count, int capacity )
 	return row;
 }
 
-static void b3EmitPointToPoint( b3JointRow* rows, int* count, int capacity, b3JointSim* base, b3StepContext* context, bool useBias,
+static b3Vec3 b3JointVectorBias( b3Vec3 error, float slop, float maxSpeed, float inv_h )
+{
+	float length = b3Length( error );
+	if ( length <= slop )
+	{
+		return b3Vec3_zero;
+	}
+
+	// Correct only the error outside the tolerance. Switching the entire
+	// correction on at the tolerance injects a finite velocity into resting joints.
+	float speed = b3MinFloat( B3_JOINT_BAUMGARTE * inv_h * ( length - slop ), maxSpeed );
+	return b3MulSV( speed / length, error );
+}
+
+static float b3JointScalarBias( float error, float slop, float maxSpeed, float inv_h )
+{
+	float correction = b3MaxFloat( b3AbsFloat( error ) - slop, 0.0f );
+	float speed = b3MinFloat( B3_JOINT_BAUMGARTE * inv_h * correction, maxSpeed );
+	return error < 0.0f ? -speed : speed;
+}
+
+static void b3EmitPointToPoint( b3JointRow* rows, int* count, int capacity, b3JointSim* base, b3StepContext* context,
+								const b3Matrix3* invInertias, bool useBias,
 								int indexA, int indexB, b3Vec3 rA, b3Vec3 rB, b3Vec3 deltaCenter, b3Vec3* linearImpulse )
 {
 	b3BodyState dummyState = b3_identityBodyState;
@@ -155,17 +175,7 @@ static void b3EmitPointToPoint( b3JointRow* rows, int* count, int capacity, b3Jo
 	if ( useBias )
 	{
 		separation = b3Add( b3Add( b3Sub( stateB->deltaPosition, stateA->deltaPosition ), b3Sub( rB, rA ) ), deltaCenter );
-		float err2 = b3LengthSquared( separation );
-		if ( err2 > B3_JOINT_LINEAR_SLOP * B3_JOINT_LINEAR_SLOP )
-		{
-			b3Vec3 raw = b3MulSV( B3_JOINT_BAUMGARTE * context->inv_h, separation );
-			float length = b3Length( raw );
-			if ( length > B3_JOINT_MAX_LINEAR_BIAS && length > 0.0f )
-			{
-				raw = b3MulSV( B3_JOINT_MAX_LINEAR_BIAS / length, raw );
-			}
-			bias = raw;
-		}
+		bias = b3JointVectorBias( separation, B3_JOINT_LINEAR_SLOP, B3_JOINT_MAX_LINEAR_BIAS, context->inv_h );
 	}
 
 	const b3Vec3 axes[3] = { b3Vec3_axisX, b3Vec3_axisY, b3Vec3_axisZ };
@@ -180,14 +190,15 @@ static void b3EmitPointToPoint( b3JointRow* rows, int* count, int capacity, b3Jo
 		row->jAngA = b3Cross( axes[k], rA );
 		row->jLinB = axes[k];
 		row->jAngB = b3Cross( rB, axes[k] );
-		b3FillRowMass( row, base, stateA, stateB );
-		row->rhs = b3GetByIndex( cdot, k ) + b3GetByIndex( bias, k );
-		row->posErr = b3GetByIndex( separation, k );
+		b3FillRowMass( row, base, invInertias );
+		row->bias = b3GetByIndex( bias, k );
+		row->rhs = b3GetByIndex( cdot, k ) + row->bias;
 		row->lambda = lambda[k];
 	}
 }
 
-static void b3EmitAngularEqual( b3JointRow* rows, int* count, int capacity, b3JointSim* base, b3StepContext* context, bool useBias,
+static void b3EmitAngularEqual( b3JointRow* rows, int* count, int capacity, b3JointSim* base, b3StepContext* context,
+								const b3Matrix3* invInertias, bool useBias,
 								int indexA, int indexB, b3Vec3 angularError, b3Vec3* angularImpulse )
 {
 	b3BodyState dummyState = b3_identityBodyState;
@@ -198,17 +209,7 @@ static void b3EmitAngularEqual( b3JointRow* rows, int* count, int capacity, b3Jo
 	b3Vec3 bias = b3Vec3_zero;
 	if ( useBias )
 	{
-		float err2 = b3LengthSquared( angularError );
-		if ( err2 > B3_JOINT_ANGULAR_SLOP * B3_JOINT_ANGULAR_SLOP )
-		{
-			b3Vec3 raw = b3MulSV( B3_JOINT_BAUMGARTE * context->inv_h, angularError );
-			float length = b3Length( raw );
-			if ( length > B3_JOINT_MAX_ANGULAR_BIAS && length > 0.0f )
-			{
-				raw = b3MulSV( B3_JOINT_MAX_ANGULAR_BIAS / length, raw );
-			}
-			bias = raw;
-		}
+		bias = b3JointVectorBias( angularError, B3_JOINT_ANGULAR_SLOP, B3_JOINT_MAX_ANGULAR_BIAS, context->inv_h );
 	}
 
 	const b3Vec3 axes[3] = { b3Vec3_axisX, b3Vec3_axisY, b3Vec3_axisZ };
@@ -221,13 +222,15 @@ static void b3EmitAngularEqual( b3JointRow* rows, int* count, int capacity, b3Jo
 		row->indexB = indexB;
 		row->jAngA = b3Neg( axes[k] );
 		row->jAngB = axes[k];
-		b3FillRowMass( row, base, stateA, stateB );
-		row->rhs = b3GetByIndex( cdot, k ) + b3GetByIndex( bias, k );
+		b3FillRowMass( row, base, invInertias );
+		row->bias = b3GetByIndex( bias, k );
+		row->rhs = b3GetByIndex( cdot, k ) + row->bias;
 		row->lambda = lambda[k];
 	}
 }
 
-static void b3EmitAxisAngular( b3JointRow* rows, int* count, int capacity, b3JointSim* base, b3StepContext* context, bool useBias,
+static void b3EmitAxisAngular( b3JointRow* rows, int* count, int capacity, b3JointSim* base, b3StepContext* context,
+							   const b3Matrix3* invInertias, bool useBias,
 							   int indexA, int indexB, b3Vec3 axis, float c, float* lambda )
 {
 	b3BodyState dummyState = b3_identityBodyState;
@@ -236,9 +239,9 @@ static void b3EmitAxisAngular( b3JointRow* rows, int* count, int capacity, b3Joi
 
 	float cdot = b3Dot( b3Sub( stateB->angularVelocity, stateA->angularVelocity ), axis );
 	float bias = 0.0f;
-	if ( useBias && b3AbsFloat( c ) > B3_JOINT_ANGULAR_SLOP )
+	if ( useBias )
 	{
-		bias = b3ClampFloat( B3_JOINT_BAUMGARTE * context->inv_h * c, -B3_JOINT_MAX_ANGULAR_BIAS, B3_JOINT_MAX_ANGULAR_BIAS );
+		bias = b3JointScalarBias( c, B3_JOINT_ANGULAR_SLOP, B3_JOINT_MAX_ANGULAR_BIAS, context->inv_h );
 	}
 
 	b3JointRow* row = b3PushRow( rows, count, capacity );
@@ -246,12 +249,14 @@ static void b3EmitAxisAngular( b3JointRow* rows, int* count, int capacity, b3Joi
 	row->indexB = indexB;
 	row->jAngA = b3Neg( axis );
 	row->jAngB = axis;
-	b3FillRowMass( row, base, stateA, stateB );
+	b3FillRowMass( row, base, invInertias );
+	row->bias = bias;
 	row->rhs = cdot + bias;
 	row->lambda = lambda;
 }
 
-static void b3EmitJoint( b3JointRow* rows, int* count, int capacity, b3JointSim* base, b3StepContext* context, bool useBias )
+static void b3EmitJoint( b3JointRow* rows, int* count, int capacity, b3JointSim* base, b3StepContext* context,
+						 const b3Matrix3* invInertias, bool useBias )
 {
 	switch ( base->type )
 	{
@@ -271,7 +276,7 @@ static void b3EmitJoint( b3JointRow* rows, int* count, int capacity, b3JointSim*
 
 			if ( joint->linearHertz == 0.0f )
 			{
-				b3EmitPointToPoint( rows, count, capacity, base, context, useBias, joint->indexA, joint->indexB, rA, rB,
+				b3EmitPointToPoint( rows, count, capacity, base, context, invInertias, useBias, joint->indexA, joint->indexB, rA, rB,
 									joint->deltaCenter, &joint->linearImpulse );
 			}
 
@@ -287,7 +292,7 @@ static void b3EmitJoint( b3JointRow* rows, int* count, int capacity, b3JointSim*
 				b3Quat relQ = b3InvMulQuat( quatA, quatB );
 				b3Vec3 deltaRotation = b3DeltaQuatToRotation( relQ, b3Quat_identity );
 				b3Vec3 angularError = b3Neg( b3RotateVector( quatA, deltaRotation ) );
-				b3EmitAngularEqual( rows, count, capacity, base, context, useBias, joint->indexA, joint->indexB, angularError,
+				b3EmitAngularEqual( rows, count, capacity, base, context, invInertias, useBias, joint->indexA, joint->indexB, angularError,
 									&joint->angularImpulse );
 			}
 		}
@@ -301,7 +306,7 @@ static void b3EmitJoint( b3JointRow* rows, int* count, int capacity, b3JointSim*
 			b3BodyState* stateB = joint->indexB == B3_NULL_INDEX ? &dummyState : context->states + joint->indexB;
 			b3Vec3 rA = b3RotateVector( stateA->deltaRotation, joint->frameA.p );
 			b3Vec3 rB = b3RotateVector( stateB->deltaRotation, joint->frameB.p );
-			b3EmitPointToPoint( rows, count, capacity, base, context, useBias, joint->indexA, joint->indexB, rA, rB,
+			b3EmitPointToPoint( rows, count, capacity, base, context, invInertias, useBias, joint->indexA, joint->indexB, rA, rB,
 								joint->deltaCenter, &joint->linearImpulse );
 		}
 		break;
@@ -314,7 +319,7 @@ static void b3EmitJoint( b3JointRow* rows, int* count, int capacity, b3JointSim*
 			b3BodyState* stateB = joint->indexB == B3_NULL_INDEX ? &dummyState : context->states + joint->indexB;
 			b3Vec3 rA = b3RotateVector( stateA->deltaRotation, joint->frameA.p );
 			b3Vec3 rB = b3RotateVector( stateB->deltaRotation, joint->frameB.p );
-			b3EmitPointToPoint( rows, count, capacity, base, context, useBias, joint->indexA, joint->indexB, rA, rB,
+			b3EmitPointToPoint( rows, count, capacity, base, context, invInertias, useBias, joint->indexA, joint->indexB, rA, rB,
 								joint->deltaCenter, &joint->linearImpulse );
 
 			if ( base->fixedRotation == false )
@@ -331,9 +336,9 @@ static void b3EmitJoint( b3JointRow* rows, int* count, int capacity, b3JointSim*
 					0.5f, b3RotateVector( quatA, b3Add( b3MulSV( relQ.s, b3Vec3_axisX ), b3Cross( relQ.v, b3Vec3_axisX ) ) ) );
 				b3Vec3 perpAxisY = b3MulSV(
 					0.5f, b3RotateVector( quatA, b3Add( b3MulSV( relQ.s, b3Vec3_axisY ), b3Cross( relQ.v, b3Vec3_axisY ) ) ) );
-				b3EmitAxisAngular( rows, count, capacity, base, context, useBias, joint->indexA, joint->indexB, perpAxisX, relQ.v.x,
+				b3EmitAxisAngular( rows, count, capacity, base, context, invInertias, useBias, joint->indexA, joint->indexB, perpAxisX, relQ.v.x,
 								   &joint->perpImpulse.x );
-				b3EmitAxisAngular( rows, count, capacity, base, context, useBias, joint->indexA, joint->indexB, perpAxisY, relQ.v.y,
+				b3EmitAxisAngular( rows, count, capacity, base, context, invInertias, useBias, joint->indexA, joint->indexB, perpAxisY, relQ.v.y,
 								   &joint->perpImpulse.y );
 			}
 		}
@@ -356,7 +361,7 @@ static void b3EmitJoint( b3JointRow* rows, int* count, int capacity, b3JointSim*
 				b3Quat relQ = b3InvMulQuat( quatA, quatB );
 				b3Vec3 deltaRotation = b3DeltaQuatToRotation( relQ, b3Quat_identity );
 				b3Vec3 angularError = b3Neg( b3RotateVector( quatA, deltaRotation ) );
-				b3EmitAngularEqual( rows, count, capacity, base, context, useBias, joint->indexA, joint->indexB, angularError,
+				b3EmitAngularEqual( rows, count, capacity, base, context, invInertias, useBias, joint->indexA, joint->indexB, angularError,
 									&joint->angularImpulse );
 			}
 
@@ -374,10 +379,9 @@ static void b3EmitJoint( b3JointRow* rows, int* count, int capacity, b3JointSim*
 				b3Vec3 n = perps[k];
 				float cdot = b3Dot( n, vRel );
 				float bias = 0.0f;
-				if ( useBias && b3AbsFloat( cs[k] ) > B3_JOINT_LINEAR_SLOP )
+				if ( useBias )
 				{
-					bias = b3ClampFloat( B3_JOINT_BAUMGARTE * context->inv_h * cs[k], -B3_JOINT_MAX_LINEAR_BIAS,
-										 B3_JOINT_MAX_LINEAR_BIAS );
+					bias = b3JointScalarBias( cs[k], B3_JOINT_LINEAR_SLOP, B3_JOINT_MAX_LINEAR_BIAS, context->inv_h );
 				}
 				b3JointRow* row = b3PushRow( rows, count, capacity );
 				row->indexA = joint->indexA;
@@ -386,9 +390,9 @@ static void b3EmitJoint( b3JointRow* rows, int* count, int capacity, b3JointSim*
 				row->jAngA = b3Neg( b3Cross( rAd, n ) );
 				row->jLinB = n;
 				row->jAngB = b3Cross( rB, n );
-				b3FillRowMass( row, base, stateA, stateB );
+				b3FillRowMass( row, base, invInertias );
+				row->bias = bias;
 				row->rhs = cdot + bias;
-				row->posErr = cs[k];
 				row->lambda = lambdas[k];
 			}
 		}
@@ -421,10 +425,9 @@ static void b3EmitJoint( b3JointRow* rows, int* count, int capacity, b3JointSim*
 			float cdot = b3Dot( axis, vr );
 			float c = length - joint->length;
 			float bias = 0.0f;
-			if ( useBias && b3AbsFloat( c ) > B3_JOINT_LINEAR_SLOP )
+			if ( useBias )
 			{
-				bias = b3ClampFloat( B3_JOINT_BAUMGARTE * context->inv_h * c, -B3_JOINT_MAX_LINEAR_BIAS,
-									 B3_JOINT_MAX_LINEAR_BIAS );
+				bias = b3JointScalarBias( c, B3_JOINT_LINEAR_SLOP, B3_JOINT_MAX_LINEAR_BIAS, context->inv_h );
 			}
 
 			b3JointRow* row = b3PushRow( rows, count, capacity );
@@ -434,9 +437,9 @@ static void b3EmitJoint( b3JointRow* rows, int* count, int capacity, b3JointSim*
 			row->jAngA = b3Neg( b3Cross( rA, axis ) );
 			row->jLinB = axis;
 			row->jAngB = b3Cross( rB, axis );
-			b3FillRowMass( row, base, stateA, stateB );
+			b3FillRowMass( row, base, invInertias );
+			row->bias = bias;
 			row->rhs = cdot + bias;
-			row->posErr = c;
 			row->lambda = &joint->impulse;
 		}
 		break;
@@ -453,11 +456,11 @@ static float b3RowDotMinv( const b3JointRow* a, const b3JointRow* b )
 	{
 		if ( a->indexA == b->indexA )
 		{
-			s += a->invMassA * b3Dot( a->jLinA, b->jLinA ) + b3Dot( a->jAngA, b3MulMV( a->invIA, b->jAngA ) );
+			s += a->invMassA * b3Dot( a->jLinA, b->jLinA ) + b3Dot( a->jAngA, b->massAngA );
 		}
 		if ( a->indexA == b->indexB )
 		{
-			s += a->invMassA * b3Dot( a->jLinA, b->jLinB ) + b3Dot( a->jAngA, b3MulMV( a->invIA, b->jAngB ) );
+			s += a->invMassA * b3Dot( a->jLinA, b->jLinB ) + b3Dot( a->jAngA, b->massAngB );
 		}
 	}
 
@@ -465,26 +468,26 @@ static float b3RowDotMinv( const b3JointRow* a, const b3JointRow* b )
 	{
 		if ( a->indexB == b->indexA )
 		{
-			s += a->invMassB * b3Dot( a->jLinB, b->jLinA ) + b3Dot( a->jAngB, b3MulMV( a->invIB, b->jAngA ) );
+			s += a->invMassB * b3Dot( a->jLinB, b->jLinA ) + b3Dot( a->jAngB, b->massAngA );
 		}
 		if ( a->indexB == b->indexB )
 		{
-			s += a->invMassB * b3Dot( a->jLinB, b->jLinB ) + b3Dot( a->jAngB, b3MulMV( a->invIB, b->jAngB ) );
+			s += a->invMassB * b3Dot( a->jLinB, b->jLinB ) + b3Dot( a->jAngB, b->massAngB );
 		}
 	}
 
 	return s;
 }
 
-static void b3DenseLdl( float* a, int n )
+static void b3DenseLdl( double* a, const int* first, int n )
 {
-	float v[B3_JOINT_LDL_MAX_ROWS];
+	double v[B3_JOINT_LDL_MAX_ROWS];
 	for ( int j = 0; j < n; ++j )
 	{
-		float d = a[j * n + j];
-		for ( int k = 0; k < j; ++k )
+		double d = a[j * n + j];
+		for ( int k = first[j]; k < j; ++k )
 		{
-			float ljk = a[j * n + k];
+			double ljk = a[j * n + k];
 			d -= ljk * ljk * a[k * n + k];
 		}
 
@@ -494,18 +497,22 @@ static void b3DenseLdl( float* a, int n )
 		}
 
 		a[j * n + j] = d;
-		float invD = 1.0f / d;
+		double invD = 1.0 / d;
 
-		for ( int k = 0; k < j; ++k )
+		for ( int k = first[j]; k < j; ++k )
 		{
 			v[k] = a[j * n + k] * a[k * n + k];
 		}
 
 		for ( int i = j + 1; i < n; ++i )
 		{
-			float s = a[i * n + j];
-			const float* rowI = a + i * n;
-			for ( int k = 0; k < j; ++k )
+			if ( first[i] > j )
+			{
+				continue;
+			}
+			double s = a[i * n + j];
+			const double* rowI = a + i * n;
+			for ( int k = b3MaxInt( first[i], first[j] ); k < j; ++k )
 			{
 				s -= rowI[k] * v[k];
 			}
@@ -514,31 +521,34 @@ static void b3DenseLdl( float* a, int n )
 	}
 }
 
-static void b3DenseLdlSolve( const float* a, float* x, const float* b, int n )
+static void b3DenseLdlSolve( const double* a, const int* first, float* x, const float* b, int n )
 {
+	double y[B3_JOINT_LDL_MAX_ROWS];
 	for ( int i = 0; i < n; ++i )
 	{
-		float s = b[i];
-		for ( int k = 0; k < i; ++k )
+		double s = b[i];
+		for ( int k = first[i]; k < i; ++k )
 		{
-			s -= a[i * n + k] * x[k];
+			s -= a[i * n + k] * y[k];
 		}
-		x[i] = s;
+		y[i] = s;
 	}
 
 	for ( int i = 0; i < n; ++i )
 	{
-		x[i] /= a[i * n + i];
+		y[i] /= a[i * n + i];
 	}
 
 	for ( int i = n - 1; i >= 0; --i )
 	{
-		float s = x[i];
-		for ( int k = i + 1; k < n; ++k )
+		for ( int k = first[i]; k < i; ++k )
 		{
-			s -= a[k * n + i] * x[k];
+			y[k] -= a[i * n + k] * y[i];
 		}
-		x[i] = s;
+	}
+	for ( int i = 0; i < n; ++i )
+	{
+		x[i] = (float)y[i];
 	}
 }
 
@@ -607,7 +617,7 @@ static void b3ApplyDelta( b3StepContext* context, const b3JointRow* row, float i
 		if ( state->flags & b3_dynamicFlag )
 		{
 			state->linearVelocity = b3MulAdd( state->linearVelocity, row->invMassA * impulse, row->jLinA );
-			state->angularVelocity = b3Add( state->angularVelocity, b3MulMV( row->invIA, b3MulSV( impulse, row->jAngA ) ) );
+			state->angularVelocity = b3Add( state->angularVelocity, b3MulSV( impulse, row->massAngA ) );
 		}
 	}
 
@@ -617,11 +627,14 @@ static void b3ApplyDelta( b3StepContext* context, const b3JointRow* row, float i
 		if ( state->flags & b3_dynamicFlag )
 		{
 			state->linearVelocity = b3MulAdd( state->linearVelocity, row->invMassB * impulse, row->jLinB );
-			state->angularVelocity = b3Add( state->angularVelocity, b3MulMV( row->invIB, b3MulSV( impulse, row->jAngB ) ) );
+			state->angularVelocity = b3Add( state->angularVelocity, b3MulSV( impulse, row->massAngB ) );
 		}
 	}
 
-	*row->lambda += impulse;
+	if ( row->lambda != NULL )
+	{
+		*row->lambda += impulse;
+	}
 }
 
 static bool b3JointSolutionValid( const float* x, int n )
@@ -639,7 +652,7 @@ static bool b3JointSolutionValid( const float* x, int n )
 
 static void b3ApplyIsland( b3StepContext* context, const b3JointRow* rows, const int* idx, int n, const float* x,
 						   const int* islandBodies, int islandBodyCount,
-						   b3Vec3* savedLin, b3Vec3* savedAng )
+						   b3Vec3* savedLin, b3Vec3* savedAng, bool positionProjection )
 {
 	if ( b3JointSolutionValid( x, n ) == false )
 	{
@@ -649,14 +662,55 @@ static void b3ApplyIsland( b3StepContext* context, const b3JointRow* rows, const
 	for ( int i = 0; i < islandBodyCount; ++i )
 	{
 		int b = islandBodies[i];
-		const b3BodyState* state = context->states + b;
+		b3BodyState* state = context->states + b;
 		savedLin[i] = state->linearVelocity;
 		savedAng[i] = state->angularVelocity;
+		if ( positionProjection )
+		{
+			state->linearVelocity = b3Vec3_zero;
+			state->angularVelocity = b3Vec3_zero;
+		}
 	}
 
 	for ( int i = 0; i < n; ++i )
 	{
 		b3ApplyDelta( context, rows + idx[i], x[i] );
+	}
+
+	// Geometric corrections share a trust region. Physical speed limits are
+	// handled after this solve so their changes can be projected through J.
+	if ( positionProjection )
+	{
+		float maxCorrectionSpeed = 0.2f * context->inv_h;
+		float maxCorrectionSpeedSquared = maxCorrectionSpeed * maxCorrectionSpeed;
+		float motionScale = 1.0f;
+		for ( int i = 0; i < islandBodyCount; ++i )
+		{
+			b3BodyState* state = context->states + islandBodies[i];
+			state->linearVelocity.x = ( state->flags & b3_lockLinearX ) ? 0.0f : state->linearVelocity.x;
+			state->linearVelocity.y = ( state->flags & b3_lockLinearY ) ? 0.0f : state->linearVelocity.y;
+			state->linearVelocity.z = ( state->flags & b3_lockLinearZ ) ? 0.0f : state->linearVelocity.z;
+			state->angularVelocity.x = ( state->flags & b3_lockAngularX ) ? 0.0f : state->angularVelocity.x;
+			state->angularVelocity.y = ( state->flags & b3_lockAngularY ) ? 0.0f : state->angularVelocity.y;
+			state->angularVelocity.z = ( state->flags & b3_lockAngularZ ) ? 0.0f : state->angularVelocity.z;
+			if ( b3LengthSquared( state->linearVelocity ) > maxCorrectionSpeedSquared )
+			{
+				motionScale = b3MinFloat( motionScale, maxCorrectionSpeed / b3Length( state->linearVelocity ) );
+			}
+			if ( b3LengthSquared( state->angularVelocity ) > maxCorrectionSpeedSquared )
+			{
+				motionScale = b3MinFloat( motionScale, maxCorrectionSpeed / b3Length( state->angularVelocity ) );
+			}
+		}
+		if ( motionScale < 1.0f )
+		{
+			for ( int i = 0; i < islandBodyCount; ++i )
+			{
+				b3BodyState* state = context->states + islandBodies[i];
+				state->linearVelocity = b3MulSV( motionScale, state->linearVelocity );
+				state->angularVelocity = b3MulSV( motionScale, state->angularVelocity );
+			}
+		}
 	}
 
 	bool exploded = false;
@@ -690,13 +744,145 @@ static void b3ApplyIsland( b3StepContext* context, const b3JointRow* rows, const
 			}
 		}
 	}
+	else if ( positionProjection )
+	{
+		for ( int i = 0; i < islandBodyCount; ++i )
+		{
+			b3BodyState* state = context->states + islandBodies[i];
+			state->deltaPosition = b3MulAdd( state->deltaPosition, context->h, state->linearVelocity );
+			state->deltaRotation = b3IntegrateRotation( state->deltaRotation, b3MulSV( context->h, state->angularVelocity ) );
+			state->linearVelocity = savedLin[i];
+			state->angularVelocity = savedAng[i];
+		}
+	}
 }
 
-static void b3SolveIslandDense( b3StepContext* context, const b3JointRow* rows, const int* idx, int n, float* a, float* b,
+static float b3JointRowVelocity( const b3StepContext* context, const b3JointRow* row )
+{
+	float velocity = 0.0f;
+	if ( row->indexA != B3_NULL_INDEX )
+	{
+		const b3BodyState* state = context->states + row->indexA;
+		velocity += b3Dot( row->jLinA, state->linearVelocity ) + b3Dot( row->jAngA, state->angularVelocity );
+	}
+	if ( row->indexB != B3_NULL_INDEX )
+	{
+		const b3BodyState* state = context->states + row->indexB;
+		velocity += b3Dot( row->jLinB, state->linearVelocity ) + b3Dot( row->jAngB, state->angularVelocity );
+	}
+	return velocity;
+}
+
+static void b3SaveJointSpeeds( b3StepContext* context, const int* bodies, int count, b3Vec3* linear, b3Vec3* angular )
+{
+	for ( int i = 0; i < count; ++i )
+	{
+		linear[i] = context->states[bodies[i]].linearVelocity;
+		angular[i] = context->states[bodies[i]].angularVelocity;
+	}
+}
+
+static bool b3ValidateJointSpeeds( b3StepContext* context, const b3JointRow* rows, const int* idx, int n,
+								 const int* bodies, int count, const b3Vec3* linear, const b3Vec3* angular )
+{
+	for ( int i = 0; i < count; ++i )
+	{
+		const b3BodyState* state = context->states + bodies[i];
+		if ( b3IsValidVec3( state->linearVelocity ) == false || b3IsValidVec3( state->angularVelocity ) == false )
+		{
+			for ( int j = 0; j < count; ++j )
+			{
+				context->states[bodies[j]].linearVelocity = linear[j];
+				context->states[bodies[j]].angularVelocity = angular[j];
+			}
+			for ( int j = 0; j < n; ++j )
+			{
+				float* impulse = rows[idx[j]].lambda;
+				if ( impulse != NULL )
+				{
+					*impulse = 0.0f;
+				}
+			}
+			return false;
+		}
+	}
+	return true;
+}
+
+static float b3LimitJointSpeeds( b3StepContext* context, const int* bodies, int count, bool clip )
+{
+	float linearLimit = context->maxLinearVelocity;
+	float angularLimit = B3_MAX_ROTATION * context->inv_dt;
+	float scale = 1.0f;
+	for ( int i = 0; i < count; ++i )
+	{
+		b3BodyState* state = context->states + bodies[i];
+		float v2 = b3LengthSquared( state->linearVelocity );
+		float w2 = b3LengthSquared( state->angularVelocity );
+		if ( v2 > linearLimit * linearLimit )
+		{
+			float s = linearLimit / sqrtf( v2 );
+			scale = b3MinFloat( scale, s );
+			if ( clip )
+			{
+				state->linearVelocity = b3MulSV( s, state->linearVelocity );
+				state->flags |= b3_isSpeedCapped;
+			}
+		}
+		if ( w2 > angularLimit * angularLimit && ( state->flags & b3_allowFastRotation ) == 0 )
+		{
+			float s = angularLimit / sqrtf( w2 );
+			scale = b3MinFloat( scale, s );
+			if ( clip )
+			{
+				state->angularVelocity = b3MulSV( s, state->angularVelocity );
+				state->flags |= b3_isSpeedCapped;
+			}
+		}
+	}
+	return scale;
+}
+
+static void b3ScaleJointSpeeds( b3StepContext* context, const int* bodies, int count )
+{
+	float scale = b3LimitJointSpeeds( context, bodies, count, false );
+	if ( scale < 1.0f )
+	{
+		for ( int i = 0; i < count; ++i )
+		{
+			b3BodyState* state = context->states + bodies[i];
+			state->linearVelocity = b3MulSV( scale, state->linearVelocity );
+			state->angularVelocity = b3MulSV( scale, state->angularVelocity );
+			state->flags |= b3_isSpeedCapped;
+		}
+	}
+}
+
+static void b3SolveIslandDense( b3StepContext* context, const b3JointRow* rows, int* idx, int n, double* a, float* b,
 								float* x, float* scale,
 								int* islandBodies, int* bodyTag,
-								b3Vec3* savedLin, b3Vec3* savedAng )
+								b3Vec3* savedLin, b3Vec3* savedAng, bool positionProjection )
 {
+	if ( n > 128 )
+	{
+		b3PairOrd order[B3_JOINT_LDL_MAX_ROWS];
+		for ( int i = 0; i < n; ++i )
+		{
+			const b3JointRow* row = rows + idx[i];
+			int key = row->indexA == B3_NULL_INDEX ? row->indexB : row->indexA;
+			if ( row->indexB != B3_NULL_INDEX )
+			{
+				key = b3MinInt( key, row->indexB );
+			}
+			order[i] = (b3PairOrd){ key, idx[i] };
+		}
+		qsort( order, n, sizeof( b3PairOrd ), b3ComparePairOrd );
+		for ( int i = 0; i < n; ++i )
+		{
+			idx[i] = order[i].index;
+		}
+	}
+	int first[B3_JOINT_LDL_MAX_ROWS];
 	int islandBodyCount = 0;
 	for ( int k = 0; k < n; ++k )
 	{
@@ -713,35 +899,76 @@ static void b3SolveIslandDense( b3StepContext* context, const b3JointRow* rows, 
 		}
 	}
 
+	int bodyHead[2 * B3_JOINT_LDL_MAX_ROWS];
+	int next[2 * B3_JOINT_LDL_MAX_ROWS];
+	int visited[B3_JOINT_LDL_MAX_ROWS];
+	int candidates[B3_JOINT_LDL_MAX_ROWS];
+	for ( int i = 0; i < islandBodyCount; ++i )
+	{
+		bodyHead[i] = B3_NULL_INDEX;
+	}
+	for ( int i = 0; i < n; ++i )
+	{
+		visited[i] = B3_NULL_INDEX;
+	}
+
+	for ( int i = 0; i < n; ++i )
+	{
+		first[i] = i;
+		const b3JointRow* ri = rows + idx[i];
+		b[i] = -ri->rhs;
+		a[i * n + i] = b3RowDotMinv( ri, ri );
+		int candidateCount = 0;
+		int firstCandidate = i;
+		int bodies[2] = { ri->indexA, ri->indexB };
+		for ( int side = 0; side < 2; ++side )
+		{
+			if ( bodies[side] == B3_NULL_INDEX )
+			{
+				continue;
+			}
+			int body = bodyTag[bodies[side]];
+			for ( int link = bodyHead[body]; link != B3_NULL_INDEX; link = next[link] )
+			{
+				int j = link / 2;
+				if ( visited[j] != i )
+				{
+					visited[j] = i;
+					candidates[candidateCount++] = j;
+					firstCandidate = b3MinInt( firstCandidate, j );
+				}
+			}
+		}
+		memset( a + i * n + firstCandidate, 0, ( i - firstCandidate ) * sizeof( double ) );
+		for ( int k = 0; k < candidateCount; ++k )
+		{
+			int j = candidates[k];
+			float s = b3RowDotMinv( ri, rows + idx[j] );
+			if ( s != 0.0f )
+			{
+				first[i] = b3MinInt( first[i], j );
+			}
+			a[i * n + j] = s;
+		}
+		for ( int side = 0; side < 2; ++side )
+		{
+			if ( bodies[side] != B3_NULL_INDEX )
+			{
+				int body = bodyTag[bodies[side]];
+				int link = 2 * i + side;
+				next[link] = bodyHead[body];
+				bodyHead[body] = link;
+			}
+		}
+	}
 	for ( int i = 0; i < islandBodyCount; ++i )
 	{
 		bodyTag[islandBodies[i]] = -1;
 	}
 
-	memset( a, 0, n * n * sizeof( float ) );
-
 	for ( int i = 0; i < n; ++i )
 	{
-		const b3JointRow* ri = rows + idx[i];
-		b[i] = -ri->rhs;
-		a[i * n + i] = b3RowDotMinv( ri, ri );
-
-		for ( int j = 0; j < i; ++j )
-		{
-			const b3JointRow* rj = rows + idx[j];
-			if ( ( ri->indexA != B3_NULL_INDEX && ( ri->indexA == rj->indexA || ri->indexA == rj->indexB ) ) ||
-				 ( ri->indexB != B3_NULL_INDEX && ( ri->indexB == rj->indexA || ri->indexB == rj->indexB ) ) )
-			{
-				float s = b3RowDotMinv( ri, rj );
-				a[i * n + j] = s;
-				a[j * n + i] = s;
-			}
-		}
-	}
-
-	for ( int i = 0; i < n; ++i )
-	{
-		float d = a[i * n + i];
+		float d = (float)a[i * n + i];
 		if ( d < B3_JOINT_DIAG_EPS )
 		{
 			d = B3_JOINT_DIAG_EPS;
@@ -752,41 +979,74 @@ static void b3SolveIslandDense( b3StepContext* context, const b3JointRow* rows, 
 	for ( int i = 0; i < n; ++i )
 	{
 		b[i] *= scale[i];
-		for ( int j = 0; j <= i; ++j )
+		for ( int j = first[i]; j <= i; ++j )
 		{
-			float s = a[i * n + j] * scale[i] * scale[j];
+			double s = a[i * n + j] * scale[i] * scale[j];
 			if ( i == j )
 			{
-				s += B3_JOINT_DIAG_EPS + B3_JOINT_CFM_TREE;
+				s += B3_JOINT_DIAG_EPS + ( positionProjection ? B3_JOINT_POSITION_CFM : B3_JOINT_CFM_TREE );
 			}
 			a[i * n + j] = s;
-			a[j * n + i] = s;
 		}
 	}
 
-	b3DenseLdl( a, n );
-	b3DenseLdlSolve( a, x, b, n );
+	b3DenseLdl( a, first, n );
+	b3DenseLdlSolve( a, first, x, b, n );
 
 	for ( int i = 0; i < n; ++i )
 	{
 		x[i] *= scale[i];
 	}
 
-	b3ApplyIsland( context, rows, idx, n, x, islandBodies, islandBodyCount, savedLin, savedAng );
+	b3ApplyIsland( context, rows, idx, n, x, islandBodies, islandBodyCount, savedLin, savedAng, positionProjection );
+	if ( positionProjection == false && b3LimitJointSpeeds( context, islandBodies, islandBodyCount, false ) < 1.0f )
+	{
+		b3SaveJointSpeeds( context, islandBodies, islandBodyCount, savedLin, savedAng );
+		float target[B3_JOINT_LDL_MAX_ROWS];
+		for ( int i = 0; i < n; ++i )
+		{
+			target[i] = b3JointRowVelocity( context, rows + idx[i] );
+		}
+		for ( int iteration = 0; iteration < 8; ++iteration )
+		{
+			if ( b3LimitJointSpeeds( context, islandBodies, islandBodyCount, true ) >= 0.99999f )
+			{
+				break;
+			}
+			for ( int i = 0; i < n; ++i )
+			{
+				b[i] = ( target[i] - b3JointRowVelocity( context, rows + idx[i] ) ) * scale[i];
+			}
+			b3DenseLdlSolve( a, first, x, b, n );
+			if ( b3JointSolutionValid( x, n ) == false )
+			{
+				break;
+			}
+			for ( int i = 0; i < n; ++i )
+			{
+				b3ApplyDelta( context, rows + idx[i], x[i] * scale[i] );
+			}
+			if ( b3ValidateJointSpeeds( context, rows, idx, n, islandBodies, islandBodyCount, savedLin, savedAng ) == false )
+			{
+				break;
+			}
+		}
+		b3ScaleJointSpeeds( context, islandBodies, islandBodyCount );
+	}
 }
 
 static void b3JointPcgSolve( const b3IslandRow* __restrict pcgRows, int n, float* __restrict x, const float* __restrict b,
 							 float* __restrict r, float* __restrict z, float* __restrict p, float* __restrict ap,
-							 const float* __restrict invDiag, const float* __restrict scale,
+							 const float* __restrict scale,
 							 const b3Matrix3* __restrict islandInvI, int islandBodyCount,
-							 b3Vec3* __restrict dLin, b3Vec3* __restrict dAng, bool useBias )
+							 b3Vec3* __restrict dLin, b3Vec3* __restrict dAng, bool useBias, float cfm )
 {
-	const float cfm = B3_JOINT_DIAG_EPS + B3_JOINT_CFM_TREE;
+	const float invDiag = 1.0f / ( 1.0f + cfm );
 	for ( int i = 0; i < n; ++i )
 	{
 		x[i] = 0.0f;
 		r[i] = b[i];
-		z[i] = invDiag[i] * r[i];
+		z[i] = invDiag * r[i];
 		p[i] = z[i];
 	}
 
@@ -844,7 +1104,7 @@ static void b3JointPcgSolve( const b3IslandRow* __restrict pcgRows, int n, float
 		float rzNew = 0.0f;
 		for ( int i = 0; i < n; ++i )
 		{
-			z[i] = invDiag[i] * r[i];
+			z[i] = invDiag * r[i];
 			rzNew += r[i] * z[i];
 		}
 
@@ -864,9 +1124,10 @@ static void b3JointPcgSolve( const b3IslandRow* __restrict pcgRows, int n, float
 
 static void b3SolveIslandPcg( b3StepContext* context, const b3JointRow* rows, const int* idx, int n,
 							  b3IslandRow* pcgRows, float* x, float* b, float* r,
-							  float* z, float* p, float* ap, float* invDiag, float* scale,
+							  float* z, float* p, float* ap, float* target, float* scale,
 							  int* islandBodies, b3Matrix3* islandInvI, int* bodyTag,
-							  b3Vec3* dLin, b3Vec3* dAng, b3Vec3* savedLin, b3Vec3* savedAng, bool useBias )
+							  b3Vec3* dLin, b3Vec3* dAng, b3Vec3* savedLin, b3Vec3* savedAng,
+							  const b3Matrix3* invInertias, bool useBias, bool positionProjection )
 {
 	int islandBodyCount = 0;
 	for ( int k = 0; k < n; ++k )
@@ -876,14 +1137,14 @@ static void b3SolveIslandPcg( b3StepContext* context, const b3JointRow* rows, co
 		{
 			bodyTag[row->indexA] = islandBodyCount;
 			islandBodies[islandBodyCount] = row->indexA;
-			islandInvI[islandBodyCount] = row->invIA;
+			islandInvI[islandBodyCount] = invInertias[row->indexA];
 			islandBodyCount += 1;
 		}
 		if ( row->indexB != B3_NULL_INDEX && bodyTag[row->indexB] == -1 )
 		{
 			bodyTag[row->indexB] = islandBodyCount;
 			islandBodies[islandBodyCount] = row->indexB;
-			islandInvI[islandBodyCount] = row->invIB;
+			islandInvI[islandBodyCount] = invInertias[row->indexB];
 			islandBodyCount += 1;
 		}
 	}
@@ -907,7 +1168,7 @@ static void b3SolveIslandPcg( b3StepContext* context, const b3JointRow* rows, co
 		bodyTag[islandBodies[i]] = -1;
 	}
 
-	const float cfm = B3_JOINT_DIAG_EPS + B3_JOINT_CFM_TREE;
+	const float cfm = B3_JOINT_DIAG_EPS + ( positionProjection ? B3_JOINT_POSITION_CFM : B3_JOINT_CFM_TREE );
 	for ( int i = 0; i < n; ++i )
 	{
 		const b3JointRow* row = rows + idx[i];
@@ -917,43 +1178,100 @@ static void b3SolveIslandPcg( b3StepContext* context, const b3JointRow* rows, co
 			d = B3_JOINT_DIAG_EPS;
 		}
 		scale[i] = 1.0f / sqrtf( d );
-		invDiag[i] = 1.0f / ( 1.0f + cfm );
 		b[i] = -row->rhs * scale[i];
 	}
 
-	b3JointPcgSolve( pcgRows, n, x, b, r, z, p, ap, invDiag, scale, islandInvI, islandBodyCount, dLin, dAng, useBias );
-	b3ApplyIsland( context, rows, idx, n, x, islandBodies, islandBodyCount, savedLin, savedAng );
+	b3JointPcgSolve( pcgRows, n, x, b, r, z, p, ap, scale, islandInvI, islandBodyCount, dLin, dAng, useBias, cfm );
+	b3ApplyIsland( context, rows, idx, n, x, islandBodies, islandBodyCount, savedLin, savedAng, positionProjection );
+	if ( positionProjection == false && b3LimitJointSpeeds( context, islandBodies, islandBodyCount, false ) < 1.0f )
+	{
+		b3SaveJointSpeeds( context, islandBodies, islandBodyCount, savedLin, savedAng );
+		for ( int i = 0; i < n; ++i )
+		{
+			target[i] = b3JointRowVelocity( context, rows + idx[i] );
+		}
+		for ( int iteration = 0; iteration < 8; ++iteration )
+		{
+			if ( b3LimitJointSpeeds( context, islandBodies, islandBodyCount, true ) >= 0.99999f )
+			{
+				break;
+			}
+			for ( int i = 0; i < n; ++i )
+			{
+				b[i] = ( target[i] - b3JointRowVelocity( context, rows + idx[i] ) ) * scale[i];
+			}
+			b3JointPcgSolve( pcgRows, n, x, b, r, z, p, ap, scale, islandInvI, islandBodyCount,
+							dLin, dAng, true, cfm );
+			if ( b3JointSolutionValid( x, n ) == false )
+			{
+				break;
+			}
+			for ( int i = 0; i < n; ++i )
+			{
+				b3ApplyDelta( context, rows + idx[i], x[i] );
+			}
+			if ( b3ValidateJointSpeeds( context, rows, idx, n, islandBodies, islandBodyCount, savedLin, savedAng ) == false )
+			{
+				break;
+			}
+		}
+		b3ScaleJointSpeeds( context, islandBodies, islandBodyCount );
+	}
 }
 
-void b3SolveJoints_Direct( b3StepContext* context, bool useBias )
+static bool b3SolveJointsDirectInternal( b3StepContext* context, bool useBias, bool resetImpulses, bool positionProjection )
 {
 	b3TracyCZoneNC( joint_direct, "JointDirect", b3_colorLemonChiffon, true );
 
 	b3World* world = context->world;
 	b3ConstraintGraph* graph = context->graph;
 	int jointCount = 0;
+	int rowCapacity = 0;
 	for ( int colorIndex = 0; colorIndex < B3_GRAPH_COLOR_COUNT; ++colorIndex )
 	{
-		jointCount += graph->colors[colorIndex].jointSims.count;
+		b3GraphColor* color = graph->colors + colorIndex;
+		jointCount += color->jointSims.count;
+		for ( int i = 0; i < color->jointSims.count; ++i )
+		{
+			const b3JointSim* joint = color->jointSims.data + i;
+			switch ( joint->type )
+			{
+				case b3_weldJoint:
+					rowCapacity += 6;
+					break;
+				case b3_sphericalJoint:
+					rowCapacity += 3;
+					break;
+				case b3_revoluteJoint:
+				case b3_prismaticJoint:
+					rowCapacity += 5;
+					break;
+				case b3_distanceJoint:
+					rowCapacity += 1;
+					break;
+				default:
+					break;
+			}
+		}
 	}
 
-	if ( jointCount == 0 )
+	if ( rowCapacity == 0 )
 	{
 		b3TracyCZoneEnd( joint_direct );
-		return;
+		return false;
 	}
 
 	int bodyCount = world->solverSets.data[b3_awakeSet].bodyStates.count;
 	if ( bodyCount == 0 )
 	{
 		b3TracyCZoneEnd( joint_direct );
-		return;
+		return false;
 	}
 
-	int rowCapacity = 6 * jointCount;
 	b3Stack* stack = &world->stack;
 
 	int phase1 = 0;
+	phase1 += b3Align16( bodyCount * (int)sizeof( b3Matrix3 ) );
 	phase1 += b3Align16( rowCapacity * (int)sizeof( b3JointRow ) );
 	phase1 += b3Align16( bodyCount * (int)sizeof( int ) );
 	phase1 += b3Align16( bodyCount * (int)sizeof( int ) );
@@ -963,6 +1281,7 @@ void b3SolveJoints_Direct( b3StepContext* context, bool useBias )
 
 	char* blob1 = (char*)b3StackAlloc( stack, phase1, "joint direct 1" );
 	char* cursor = blob1;
+	b3Matrix3* invInertias = (b3Matrix3*)b3CursorBump( &cursor, bodyCount * (int)sizeof( b3Matrix3 ) );
 	b3JointRow* rows = (b3JointRow*)b3CursorBump( &cursor, rowCapacity * (int)sizeof( b3JointRow ) );
 	int* parent = (int*)b3CursorBump( &cursor, bodyCount * (int)sizeof( int ) );
 	int* rank = (int*)b3CursorBump( &cursor, bodyCount * (int)sizeof( int ) );
@@ -972,6 +1291,14 @@ void b3SolveJoints_Direct( b3StepContext* context, bool useBias )
 
 	for ( int i = 0; i < bodyCount; ++i )
 	{
+		invInertias[i] = b3RotateInertia( context->states[i].deltaRotation, context->sims[i].invInertiaWorld );
+		if ( positionProjection && context->sims[i].invMass > 0.0f )
+		{
+			float massScale = 1.0f / sqrtf( context->sims[i].invMass );
+			invInertias[i].cx = b3MulSV( massScale, invInertias[i].cx );
+			invInertias[i].cy = b3MulSV( massScale, invInertias[i].cy );
+			invInertias[i].cz = b3MulSV( massScale, invInertias[i].cz );
+		}
 		parent[i] = i;
 		rank[i] = 0;
 		islandHead[i] = B3_NULL_INDEX;
@@ -987,7 +1314,7 @@ void b3SolveJoints_Direct( b3StepContext* context, bool useBias )
 		for ( int i = 0; i < count; ++i )
 		{
 			int begin = rowCount;
-			b3EmitJoint( rows, &rowCount, rowCapacity, joints + i, context, useBias );
+			b3EmitJoint( rows, &rowCount, rowCapacity, joints + i, context, invInertias, useBias );
 			if ( rowCount == begin )
 			{
 				continue;
@@ -995,6 +1322,29 @@ void b3SolveJoints_Direct( b3StepContext* context, bool useBias )
 
 			int indexA = rows[begin].indexA;
 			int indexB = rows[begin].indexB;
+			if ( indexA != B3_NULL_INDEX && ( context->states[indexA].flags & b3_dynamicFlag ) == 0 )
+			{
+				indexA = B3_NULL_INDEX;
+			}
+			if ( indexB != B3_NULL_INDEX && ( context->states[indexB].flags & b3_dynamicFlag ) == 0 )
+			{
+				indexB = B3_NULL_INDEX;
+			}
+			if ( indexA == B3_NULL_INDEX && indexB == B3_NULL_INDEX )
+			{
+				rowCount = begin;
+				continue;
+			}
+			for ( int k = begin; k < rowCount; ++k )
+			{
+				rows[k].indexA = indexA;
+				rows[k].indexB = indexB;
+				if ( positionProjection )
+				{
+					rows[k].invMassA = sqrtf( rows[k].invMassA );
+					rows[k].invMassB = sqrtf( rows[k].invMassB );
+				}
+			}
 			pairA[pairCount] = indexA;
 			pairB[pairCount] = indexB;
 			pairCount += 1;
@@ -1005,10 +1355,28 @@ void b3SolveJoints_Direct( b3StepContext* context, bool useBias )
 	{
 		b3StackFree( stack, blob1 );
 		b3TracyCZoneEnd( joint_direct );
-		return;
+		return false;
 	}
 
-	if ( useBias )
+	if ( positionProjection )
+	{
+		bool needsCorrection = false;
+		float threshold = B3_JOINT_BAUMGARTE * context->inv_h * 0.001f;
+		for ( int i = 0; i < rowCount; ++i )
+		{
+			needsCorrection |= b3AbsFloat( rows[i].bias ) > threshold;
+			rows[i].rhs = 4.0f * rows[i].bias;
+			rows[i].lambda = NULL;
+		}
+		if ( needsCorrection == false )
+		{
+			b3StackFree( stack, blob1 );
+			b3TracyCZoneEnd( joint_direct );
+			return false;
+		}
+	}
+
+	if ( resetImpulses )
 	{
 		for ( int i = 0; i < rowCount; ++i )
 		{
@@ -1061,16 +1429,19 @@ void b3SolveJoints_Direct( b3StepContext* context, bool useBias )
 		maxN = 6;
 	}
 
-	int denseN = maxN < B3_JOINT_LDL_MAX_ROWS ? maxN : B3_JOINT_LDL_MAX_ROWS;
-	if ( denseN < 1 )
+	int denseN = 0;
+	for ( int i = 0; i < bodyCount; ++i )
 	{
-		denseN = 1;
+		if ( rank[i] <= B3_JOINT_LDL_MAX_ROWS )
+		{
+			denseN = b3MaxInt( denseN, rank[i] );
+		}
 	}
 
-	int maxBodies = 2 * maxN;
+	int maxBodies = b3MinInt( bodyCount, 2 * maxN );
 	int phase3 = 0;
 	phase3 += b3Align16( maxN * (int)sizeof( int ) );
-	phase3 += b3Align16( denseN * denseN * (int)sizeof( float ) );
+	phase3 += b3Align16( denseN * denseN * (int)sizeof( double ) );
 	phase3 += b3Align16( maxN * (int)sizeof( b3IslandRow ) );
 	phase3 += b3Align16( maxN * (int)sizeof( float ) );
 	phase3 += b3Align16( maxN * (int)sizeof( float ) );
@@ -1091,7 +1462,7 @@ void b3SolveJoints_Direct( b3StepContext* context, bool useBias )
 	char* blob3 = (char*)b3StackAlloc( stack, phase3, "joint direct 3" );
 	cursor = blob3;
 	int* idx = (int*)b3CursorBump( &cursor, maxN * (int)sizeof( int ) );
-	float* workA = (float*)b3CursorBump( &cursor, denseN * denseN * (int)sizeof( float ) );
+	double* workA = (double*)b3CursorBump( &cursor, denseN * denseN * (int)sizeof( double ) );
 	b3IslandRow* pcgRows = (b3IslandRow*)b3CursorBump( &cursor, maxN * (int)sizeof( b3IslandRow ) );
 	float* workB = (float*)b3CursorBump( &cursor, maxN * (int)sizeof( float ) );
 	float* workX = (float*)b3CursorBump( &cursor, maxN * (int)sizeof( float ) );
@@ -1099,7 +1470,7 @@ void b3SolveJoints_Direct( b3StepContext* context, bool useBias )
 	float* workZ = (float*)b3CursorBump( &cursor, maxN * (int)sizeof( float ) );
 	float* workP = (float*)b3CursorBump( &cursor, maxN * (int)sizeof( float ) );
 	float* workAp = (float*)b3CursorBump( &cursor, maxN * (int)sizeof( float ) );
-	float* workInvDiag = (float*)b3CursorBump( &cursor, maxN * (int)sizeof( float ) );
+	float* workTarget = (float*)b3CursorBump( &cursor, maxN * (int)sizeof( float ) );
 	float* workScale = (float*)b3CursorBump( &cursor, maxN * (int)sizeof( float ) );
 	int* islandBodies = (int*)b3CursorBump( &cursor, maxBodies * (int)sizeof( int ) );
 	b3Matrix3* islandInvI = (b3Matrix3*)b3CursorBump( &cursor, maxBodies * (int)sizeof( b3Matrix3 ) );
@@ -1128,14 +1499,29 @@ void b3SolveJoints_Direct( b3StepContext* context, bool useBias )
 			idx[n++] = k;
 		}
 
+		if ( positionProjection )
+		{
+			bool needsCorrection = false;
+			float threshold = B3_JOINT_BAUMGARTE * context->inv_h * 0.001f;
+			for ( int k = 0; k < n; ++k )
+			{
+				needsCorrection |= b3AbsFloat( rows[idx[k]].bias ) > threshold;
+			}
+			if ( needsCorrection == false )
+			{
+				continue;
+			}
+		}
+
 		if ( n <= B3_JOINT_LDL_MAX_ROWS )
 		{
-			b3SolveIslandDense( context, rows, idx, n, workA, workB, workX, workScale, islandBodies, bodyTag, savedLin, savedAng );
+			b3SolveIslandDense( context, rows, idx, n, workA, workB, workX, workScale, islandBodies, bodyTag, savedLin, savedAng,
+								positionProjection );
 		}
 		else
 		{
-			b3SolveIslandPcg( context, rows, idx, n, pcgRows, workX, workB, workR, workZ, workP, workAp, workInvDiag, workScale,
-							  islandBodies, islandInvI, bodyTag, dLin, dAng, savedLin, savedAng, useBias );
+			b3SolveIslandPcg( context, rows, idx, n, pcgRows, workX, workB, workR, workZ, workP, workAp, workTarget, workScale,
+							  islandBodies, islandInvI, bodyTag, dLin, dAng, savedLin, savedAng, invInertias, useBias, positionProjection );
 		}
 	}
 
@@ -1144,4 +1530,21 @@ void b3SolveJoints_Direct( b3StepContext* context, bool useBias )
 	b3StackFree( stack, blob1 );
 
 	b3TracyCZoneEnd( joint_direct );
+	return true;
+}
+
+void b3SolveJoints_Direct( b3StepContext* context, bool useBias, bool resetImpulses )
+{
+	b3SolveJointsDirectInternal( context, useBias, resetImpulses, false );
+}
+
+void b3ProjectJointPositions( b3StepContext* context )
+{
+	for ( int i = 0; i < 16; ++i )
+	{
+		if ( b3SolveJointsDirectInternal( context, true, false, true ) == false )
+		{
+			break;
+		}
+	}
 }

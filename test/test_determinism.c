@@ -17,11 +17,11 @@
 // Double precision accumulates body positions in double, so the settle/sleep step and the
 // state hash differ from the float build. Both modes are internally deterministic.
 #if defined( BOX3D_DOUBLE_PRECISION )
-#define EXPECTED_SLEEP_STEP 297
-#define EXPECTED_HASH 0x27FF38C1
+#define EXPECTED_SLEEP_STEP 281
+#define EXPECTED_HASH 0x509292E0
 #else
-#define EXPECTED_SLEEP_STEP 328
-#define EXPECTED_HASH 0xB9F3F028
+#define EXPECTED_SLEEP_STEP 268
+#define EXPECTED_HASH 0xBFD1BDFE
 #endif
 
 static int SingleMultithreadingTest( int workerCount )
@@ -87,7 +87,7 @@ static int CrossPlatformTest( void )
 	float timeStep = 1.0f / 60.0f;
 
 	bool done = false;
-	while ( done == false )
+	for ( int step = 0; step < 500 && done == false; ++step )
 	{
 		int subStepCount = 4;
 		b3World_Step( worldId, timeStep, subStepCount );
@@ -95,6 +95,7 @@ static int CrossPlatformTest( void )
 
 		done = UpdateFallingRagdolls( worldId, &data );
 	}
+	ENSURE( done );
 
 	if ( data.sleepStep != EXPECTED_SLEEP_STEP || data.hash != EXPECTED_HASH )
 	{
