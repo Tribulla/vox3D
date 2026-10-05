@@ -49,9 +49,11 @@ typedef struct b3ContactConstraint
 	float restitution;
 	float rollingResistance;
 	int manifoldCount;
+	bool rigidJointContact;
 } b3ContactConstraint;
 
 int b3GetWideContactConstraintByteCount( void );
+bool b3SolveArticulatedContacts( b3StepContext* context, bool useBias );
 
 // Overflow contacts don't fit into the constraint graph coloring
 void b3PrepareContacts_Overflow( b3StepContext* context );

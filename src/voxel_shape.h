@@ -14,6 +14,9 @@ uint32_t b3Voxel_GetHash( const b3VoxelData* v );
 bool b3Voxel_GetLocalBounds( const b3VoxelData* v, b3AABB* out );
 
 int b3Voxel_QueryCells( const b3VoxelData* v, b3AABB queryLocal, b3Vec3i* out, int cap );
+typedef bool b3VoxelCellQueryFcn( b3Vec3i cell, void* context );
+void b3Voxel_VisitCells( const b3VoxelData* v, b3AABB queryLocal, b3VoxelCellQueryFcn* visitor, void* context );
+float b3Voxel_GetMinExtent( const b3VoxelData* v );
 
 int b3Voxel_GetCells( const b3VoxelData* v, b3Vec3i* out, int cap );
 
@@ -21,6 +24,12 @@ b3MassData b3Voxel_ComputeMass( const b3VoxelData* v, float density );
 
 bool b3Voxel_RemoveCells( b3VoxelData* v, const b3Vec3i* cells, int count );
 bool b3Voxel_AddCells( b3VoxelData* v, const b3Vec3i* cells, int count );
+bool b3Voxel_AddCellsEx( b3VoxelData* v, const b3Vec3i* cells, const uint16_t* geomIndices, int count );
+
+int b3Voxel_GetCellBoxes( const b3VoxelData* v, b3Vec3i cell, b3VoxelSubBox* fallback, const b3VoxelSubBox** boxes );
+bool b3Voxel_IsInternalFace( const b3VoxelData* v, b3Vec3i cell, b3VoxelSubBox box, b3AABB patch, b3Vec3 normal );
+bool b3Voxel_HasGeometry( const b3VoxelData* v );
+b3Vec3 b3Voxel_GetGeometryPadding( const b3VoxelData* v );
 
 b3CastOutput b3RayCastVoxel( const b3VoxelData* v, const b3RayCastInput* input );
 

@@ -641,21 +641,43 @@ b3AABB b3ComputeSweptShapeAABB( const b3Shape* shape, const b3Sweep* sweep, floa
 	b3Transform xf1 = { b3Sub( sweep->c1, b3RotateVector( sweep->q1, sweep->localCenter ) ), sweep->q1 };
 	b3Transform xf2 = b3GetSweepTransform( sweep, time );
 
+	b3AABB bounds;
 	switch ( shape->type )
 	{
 		case b3_capsuleShape:
-			return b3ComputeSweptCapsuleAABB( &shape->capsule, xf1, xf2 );
+			bounds = b3ComputeSweptCapsuleAABB( &shape->capsule, xf1, xf2 );
+			break;
 
 		case b3_hullShape:
-			return b3ComputeSweptHullAABB( shape->hull, xf1, xf2 );
+			bounds = b3ComputeSweptHullAABB( shape->hull, xf1, xf2 );
+			break;
 
 		case b3_sphereShape:
-			return b3ComputeSweptSphereAABB( &shape->sphere, xf1, xf2 );
+			bounds = b3ComputeSweptSphereAABB( &shape->sphere, xf1, xf2 );
+			break;
+
+		case b3_voxelShape:
+		case b3_compoundShape:
+		case b3_meshShape:
+		case b3_heightShape:
+			bounds = b3AABB_Union( b3ComputeShapeAABB( shape, xf1 ), b3ComputeShapeAABB( shape, xf2 ) );
+			break;
 
 		default:
 			B3_ASSERT( false );
 			return (b3AABB){ xf1.p, xf1.p };
 	}
+
+	float dot = b3ClampFloat( b3AbsFloat( b3DotQuat( xf1.q, xf2.q ) ), 0.0f, 1.0f );
+	if ( shape->type == b3_voxelShape && dot < 1.0f )
+	{
+		b3ShapeExtent extent = b3ComputeShapeExtent( shape, sweep->localCenter );
+		float sagitta = b3Length( extent.maxExtent ) * ( 1.0f - dot );
+		b3Vec3 padding = { sagitta, sagitta, sagitta };
+		bounds.lowerBound = b3Sub( bounds.lowerBound, padding );
+		bounds.upperBound = b3Add( bounds.upperBound, padding );
+	}
+	return bounds;
 }
 
 b3Vec3 b3GetShapeCentroid( const b3Shape* shape )
@@ -818,11 +840,9 @@ b3ShapeExtent b3ComputeShapeExtent( const b3Shape* shape, b3Vec3 localCenter )
 		case b3_voxelShape:
 		{
 			b3AABB aabb = b3VoxelData_GetBounds( shape->voxel );
-			float r1 = b3Length( b3Sub( aabb.lowerBound, localCenter ) );
-			float r2 = b3Length( b3Sub( aabb.upperBound, localCenter ) );
-			extent.minExtent = b3MinFloat( r1, r2 );
+			extent.minExtent = b3Voxel_GetMinExtent( shape->voxel );
 			b3Vec3 p = b3FarthestPointOnAABB( aabb, localCenter );
-			extent.maxExtent = b3Abs( p );
+			extent.maxExtent = b3Abs( b3Sub( p, localCenter ) );
 		}
 		break;
 
@@ -1411,12 +1431,47 @@ static void b3ResetProxy( b3World* world, b3Shape* shape, bool wakeBodies, bool 
 	b3ValidateSolverSets( world );
 }
 
-static void b3RefreshVoxelShape( b3World* world, b3Shape* shape )
+static void b3RefreshVoxelShape( b3World* world, b3Shape* shape, const b3Vec3i* cells, int count )
 {
 	world->locked = true;
 	shape->aabbMargin = b3ComputeShapeMargin( shape );
-	b3ResetProxy( world, shape, true, true );
 	b3Body* body = b3Array_Get( world->bodies, shape->bodyId );
+	b3WorldTransform transform = b3GetBodyTransformQuick( world, body );
+	float voxelSize = b3Voxel_GetVoxelSize( shape->voxel );
+	b3Vec3 padding = b3Add( b3Voxel_GetGeometryPadding( shape->voxel ),
+		(b3Vec3){ 0.5f * voxelSize + B3_SPECULATIVE_DISTANCE,
+				  0.5f * voxelSize + B3_SPECULATIVE_DISTANCE,
+				  0.5f * voxelSize + B3_SPECULATIVE_DISTANCE } );
+	b3Vec3 lo = { (float)cells[0].x * voxelSize, (float)cells[0].y * voxelSize, (float)cells[0].z * voxelSize };
+	b3Vec3 hi = lo;
+	for ( int i = 1; i < count; ++i )
+	{
+		b3Vec3 center = { (float)cells[i].x * voxelSize, (float)cells[i].y * voxelSize, (float)cells[i].z * voxelSize };
+		lo = b3Min( lo, center );
+		hi = b3Max( hi, center );
+	}
+	b3AABB localEdits = { b3Sub( lo, padding ), b3Add( hi, padding ) };
+	b3AABB edits = b3AABB_Transform( b3ToRelativeTransform( transform, b3Pos_zero ), localEdits );
+
+	int contactKey = body->headContactKey;
+	while ( contactKey != B3_NULL_INDEX )
+	{
+		b3Contact* contact = b3Array_Get( world->contacts, contactKey >> 1 );
+		int edgeIndex = contactKey & 1;
+		contactKey = contact->edges[edgeIndex].nextKey;
+		if ( body->type == b3_staticBody && contact->shapeIdA != shape->id && contact->shapeIdB != shape->id ) continue;
+		int otherShapeId = edgeIndex == 0 ? contact->shapeIdB : contact->shapeIdA;
+		b3Shape* otherShape = b3Array_Get( world->shapes, otherShapeId );
+		if ( body->type != b3_staticBody || b3AABB_Overlaps( edits, otherShape->fatAABB ) )
+		{
+			contact->flags &= ~b3_relativeTransformValid;
+			b3WakeBody( world, b3Array_Get( world->bodies, otherShape->bodyId ) );
+		}
+	}
+
+	b3UpdateShapeAABBs( shape, transform, body->type );
+	if ( shape->proxyKey != B3_NULL_INDEX )
+		b3BroadPhase_MoveProxy( &world->broadPhase, shape->proxyKey, shape->fatAABB );
 	b3WakeBody( world, body );
 	b3UpdateBodyMassData( world, body );
 	world->locked = false;
@@ -1429,18 +1484,17 @@ void b3VoxelShape_RemoveCells( b3ShapeId shapeId, const b3Vec3i* cells, int coun
 	b3Shape* shape = b3GetShape( world, shapeId );
 	B3_ASSERT( shape->type == b3_voxelShape );
 	if ( b3Voxel_RemoveCells( (b3VoxelData*)shape->voxel, cells, count ) )
-		b3RefreshVoxelShape( world, shape );
+		b3RefreshVoxelShape( world, shape, cells, count );
 }
 
 void b3VoxelShape_AddCells( b3ShapeId shapeId, const b3Vec3i* cells, const uint16_t* geomIndices, int count )
 {
-	B3_UNUSED( geomIndices );
 	b3World* world = b3GetUnlockedWorld( shapeId.world0 );
 	if ( world == NULL ) return;
 	b3Shape* shape = b3GetShape( world, shapeId );
 	B3_ASSERT( shape->type == b3_voxelShape );
-	if ( b3Voxel_AddCells( (b3VoxelData*)shape->voxel, cells, count ) )
-		b3RefreshVoxelShape( world, shape );
+	if ( b3Voxel_AddCellsEx( (b3VoxelData*)shape->voxel, cells, geomIndices, count ) )
+		b3RefreshVoxelShape( world, shape, cells, count );
 }
 
 void b3Shape_SetFilter( b3ShapeId shapeId, b3Filter filter, bool invokeContacts )
@@ -2542,8 +2596,93 @@ static bool b3CompoundTimeOfImpactFcn( const b3CompoundData* compound, int child
 	return true;
 }
 
+typedef struct b3VoxelImpactContext
+{
+	b3Shape* voxelShape;
+	b3Shape* otherShape;
+	b3Sweep* voxelSweep;
+	b3Sweep* otherSweep;
+	float maxFraction;
+	bool voxelIsB;
+	b3TOIOutput output;
+} b3VoxelImpactContext;
+
+static bool b3VoxelTimeOfImpactFcn( b3Vec3i cell, void* userContext )
+{
+	b3VoxelImpactContext* context = userContext;
+	float size = b3Voxel_GetVoxelSize( context->voxelShape->voxel );
+	b3VoxelSubBox fallback;
+	const b3VoxelSubBox* boxes;
+	int count = b3Voxel_GetCellBoxes( context->voxelShape->voxel, cell, &fallback, &boxes );
+	for ( int i = 0; i < count; ++i )
+	{
+		b3Vec3 center = b3Add( (b3Vec3){ cell.x * size, cell.y * size, cell.z * size }, boxes[i].center );
+		b3Vec3 h = boxes[i].halfExtents;
+		b3BoxHull hull = b3MakeOffsetBoxHull( h.x, h.y, h.z, center );
+		b3Shape box = { 0 };
+		box.type = b3_hullShape;
+		box.hull = &hull.base;
+		box.sensorIndex = context->voxelShape->sensorIndex;
+		b3TOIOutput output = context->voxelIsB ?
+			b3ShapeTimeOfImpact( context->otherShape, &box, context->otherSweep, context->voxelSweep, context->maxFraction ) :
+			b3ShapeTimeOfImpact( &box, context->otherShape, context->voxelSweep, context->otherSweep, context->maxFraction );
+		if ( 0.0f < output.fraction && output.fraction < context->maxFraction )
+		{
+			b3Transform xf = b3GetSweepTransform( context->voxelSweep, output.fraction );
+			b3Vec3 normal = context->voxelIsB ? b3Neg( output.normal ) : output.normal;
+			b3Vec3 point = b3InvTransformPoint( xf, output.point );
+			b3AABB patch = { point, point };
+			if ( b3Voxel_IsInternalFace( context->voxelShape->voxel, cell, boxes[i], patch,
+				b3InvRotateVector( xf.q, normal ) ) )
+			{
+				continue;
+			}
+			context->output = output;
+			context->maxFraction = output.fraction;
+		}
+	}
+	return true;
+}
+
+static b3TOIOutput b3VoxelTimeOfImpact( b3Shape* voxelShape, b3Shape* otherShape, b3Sweep* voxelSweep,
+	b3Sweep* otherSweep, float maxFraction, bool voxelIsB )
+{
+	b3VoxelImpactContext context = { voxelShape, otherShape, voxelSweep, otherSweep, maxFraction, voxelIsB, { 0 } };
+	context.output.fraction = maxFraction;
+	b3Transform xf = b3GetSweepTransform( voxelSweep, 0.0f );
+	b3AABB bounds = b3ComputeSweptShapeAABB( otherShape, otherSweep, maxFraction );
+	if ( otherShape->type != b3_voxelShape )
+	{
+		b3Quat endRotation = b3GetSweepTransform( otherSweep, maxFraction ).q;
+		float otherDot = b3ClampFloat( b3AbsFloat( b3DotQuat( otherSweep->q1, endRotation ) ), 0.0f, 1.0f );
+		b3ShapeExtent otherExtent = b3ComputeShapeExtent( otherShape, otherSweep->localCenter );
+		float sagitta = b3Length( otherExtent.maxExtent ) * ( 1.0f - otherDot );
+		b3Vec3 arcPadding = { sagitta, sagitta, sagitta };
+		bounds.lowerBound = b3Sub( bounds.lowerBound, arcPadding );
+		bounds.upperBound = b3Add( bounds.upperBound, arcPadding );
+	}
+	b3AABB localBounds = b3AABB_Transform( b3InvertTransform( xf ), bounds );
+	b3ShapeExtent extent = b3ComputeShapeExtent( voxelShape, voxelSweep->localCenter );
+	float dot = b3ClampFloat( b3AbsFloat( b3DotQuat( voxelSweep->q1, voxelSweep->q2 ) ), 0.0f, 1.0f );
+	float rotation = 2.0f * b3Length( extent.maxExtent ) * sqrtf( b3MaxFloat( 0.0f, 1.0f - dot * dot ) );
+	b3Vec3 translation = b3Abs( b3InvRotateVector( xf.q, b3Sub( voxelSweep->c2, voxelSweep->c1 ) ) );
+	b3Vec3 padding = b3Add( translation, (b3Vec3){ rotation, rotation, rotation } );
+	localBounds.lowerBound = b3Sub( localBounds.lowerBound, padding );
+	localBounds.upperBound = b3Add( localBounds.upperBound, padding );
+	b3Voxel_VisitCells( voxelShape->voxel, localBounds, b3VoxelTimeOfImpactFcn, &context );
+	return context.output;
+}
+
 b3TOIOutput b3ShapeTimeOfImpact( b3Shape* shapeA, b3Shape* shapeB, b3Sweep* sweepA, b3Sweep* sweepB, float maxFraction )
 {
+	if ( shapeB->type == b3_voxelShape )
+	{
+		return b3VoxelTimeOfImpact( shapeB, shapeA, sweepB, sweepA, maxFraction, true );
+	}
+	if ( shapeA->type == b3_voxelShape )
+	{
+		return b3VoxelTimeOfImpact( shapeA, shapeB, sweepA, sweepB, maxFraction, false );
+	}
 	bool isSensor = shapeA->sensorIndex != B3_NULL_INDEX;
 
 	b3ShapeType typeA = shapeA->type;

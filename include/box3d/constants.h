@@ -67,7 +67,7 @@ B3_API float b3GetStallThreshold( void );
 
 /// Maximum number of simultaneous worlds that can be allocated
 #ifndef B3_MAX_WORLDS
-#define B3_MAX_WORLDS 128
+#define B3_MAX_WORLDS 65534
 #endif
 
 /// The maximum rotation of a body per time step. This limit is very large and is used

@@ -202,7 +202,7 @@ static int TestIsValid( void )
 	return 0;
 }
 
-#define WORLD_COUNT ( B3_MAX_WORLDS / 2 )
+#define WORLD_COUNT ( B3_MAX_WORLDS < 128 ? B3_MAX_WORLDS / 2 : 64 )
 
 int TestWorldRecycle( void )
 {

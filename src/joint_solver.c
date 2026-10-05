@@ -1219,7 +1219,18 @@ static void b3SolveIslandPcg( b3StepContext* context, const b3JointRow* rows, co
 	}
 }
 
-static bool b3SolveJointsDirectInternal( b3StepContext* context, bool useBias, bool resetImpulses, bool positionProjection )
+static bool b3JointIsPowered( const b3StepContext* context, const b3JointSim* joint )
+{
+	const b3Body* a = context->world->bodies.data + joint->bodyIdA;
+	const b3Body* b = context->world->bodies.data + joint->bodyIdB;
+	return ( a->type == b3_dynamicBody && a->setIndex == b3_awakeSet &&
+		( context->sims[a->localIndex].flags & b3_poweredArticulation ) != 0 ) ||
+		( b->type == b3_dynamicBody && b->setIndex == b3_awakeSet &&
+		( context->sims[b->localIndex].flags & b3_poweredArticulation ) != 0 );
+}
+
+static bool b3SolveJointsDirectInternal( b3StepContext* context, bool useBias, bool resetImpulses, bool positionProjection,
+	bool poweredOnly )
 {
 	b3TracyCZoneNC( joint_direct, "JointDirect", b3_colorLemonChiffon, true );
 
@@ -1234,6 +1245,7 @@ static bool b3SolveJointsDirectInternal( b3StepContext* context, bool useBias, b
 		for ( int i = 0; i < color->jointSims.count; ++i )
 		{
 			const b3JointSim* joint = color->jointSims.data + i;
+			if ( poweredOnly && !b3JointIsPowered( context, joint ) ) continue;
 			switch ( joint->type )
 			{
 				case b3_weldJoint:
@@ -1314,6 +1326,7 @@ static bool b3SolveJointsDirectInternal( b3StepContext* context, bool useBias, b
 		for ( int i = 0; i < count; ++i )
 		{
 			int begin = rowCount;
+			if ( poweredOnly && !b3JointIsPowered( context, joints + i ) ) continue;
 			b3EmitJoint( rows, &rowCount, rowCapacity, joints + i, context, invInertias, useBias );
 			if ( rowCount == begin )
 			{
@@ -1535,14 +1548,19 @@ static bool b3SolveJointsDirectInternal( b3StepContext* context, bool useBias, b
 
 void b3SolveJoints_Direct( b3StepContext* context, bool useBias, bool resetImpulses )
 {
-	b3SolveJointsDirectInternal( context, useBias, resetImpulses, false );
+	b3SolveJointsDirectInternal( context, useBias, resetImpulses, false, false );
+}
+
+void b3SolvePoweredJoints_Direct( b3StepContext* context, bool useBias )
+{
+	b3SolveJointsDirectInternal( context, useBias, false, false, true );
 }
 
 void b3ProjectJointPositions( b3StepContext* context )
 {
 	for ( int i = 0; i < 16; ++i )
 	{
-		if ( b3SolveJointsDirectInternal( context, true, false, true ) == false )
+		if ( b3SolveJointsDirectInternal( context, true, false, true, false ) == false )
 		{
 			break;
 		}

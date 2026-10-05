@@ -1,6 +1,7 @@
 #include "voxel_shape.h"
 
 #include "core.h"
+#include "box3d/constants.h"
 
 #include <math.h>
 #include <string.h>
@@ -13,6 +14,7 @@
 typedef struct b3VoxelChunk
 {
 	uint8_t solid[B3_VOXEL_CHUNK_CELLS]; // 0 = air, 1 = solid; index (lx<<8)|(ly<<4)|lz
+	uint16_t* geometry; // allocated only for chunks containing non-cube cells
 	b3Vec3i* occupied;					 // compact solid local cells (0..15 per axis)
 	int occupiedCount;
 	int occupiedCapacity;
@@ -24,6 +26,12 @@ typedef struct b3VoxelChunkSlot
 	uint64_t key; // 0 = empty (real keys are never 0, see b3Voxel_packChunk)
 	int index;
 } b3VoxelChunkSlot;
+
+typedef struct b3VoxelGeometry
+{
+	b3VoxelSubBox* boxes;
+	int count;
+} b3VoxelGeometry;
 
 struct b3VoxelData
 {
@@ -41,6 +49,10 @@ struct b3VoxelData
 
 	b3VoxelChunkSlot* slots;  // hash: chunkKey -> chunks index
 	int slotCap;			  // power of two
+	b3VoxelGeometry* geometries;
+	int geometryCount;
+	int geometryCapacity;
+	b3Vec3 geometryPadding; // conservative extension beyond a cell's cube
 };
 
 static inline int b3Voxel_iaxis( b3Vec3i c, int a )
@@ -143,6 +155,7 @@ static int b3Voxel_getOrCreateChunk( b3VoxelData* v, b3Vec3i chunkPos )
 	int idx = v->chunkCount++;
 	b3VoxelChunk* chunk = v->chunks + idx;
 	memset( chunk->solid, 0, sizeof( chunk->solid ) );
+	chunk->geometry = NULL;
 	chunk->occupied = NULL;
 	chunk->occupiedCount = 0;
 	chunk->occupiedCapacity = 0;
@@ -235,6 +248,8 @@ void b3DestroyVoxelData( b3VoxelData* v )
 	for ( int i = 0; i < v->chunkCount; ++i )
 	{
 		b3VoxelChunk* chunk = v->chunks + i;
+		if ( chunk->geometry )
+			b3Free( chunk->geometry, B3_VOXEL_CHUNK_CELLS * sizeof( uint16_t ) );
 		if ( chunk->occupied )
 			b3Free( chunk->occupied, (size_t)chunk->occupiedCapacity * sizeof( b3Vec3i ) );
 	}
@@ -242,6 +257,10 @@ void b3DestroyVoxelData( b3VoxelData* v )
 		b3Free( v->chunks, (size_t)v->chunkCapacity * sizeof( b3VoxelChunk ) );
 	if ( v->slots )
 		b3Free( v->slots, (size_t)v->slotCap * sizeof( b3VoxelChunkSlot ) );
+	for ( int i = 0; i < v->geometryCount; ++i )
+		b3Free( v->geometries[i].boxes, (size_t)v->geometries[i].count * sizeof( b3VoxelSubBox ) );
+	if ( v->geometries )
+		b3Free( v->geometries, (size_t)v->geometryCapacity * sizeof( b3VoxelGeometry ) );
 	b3Free( v, sizeof( b3VoxelData ) );
 }
 
@@ -259,7 +278,8 @@ b3AABB b3VoxelData_GetBounds( const b3VoxelData* v )
 {
 	if ( v == NULL || v->cellCount == 0 )
 		return (b3AABB){ b3Vec3_zero, b3Vec3_zero };
-	return v->localBounds;
+	return (b3AABB){ b3Sub( v->localBounds.lowerBound, v->geometryPadding ),
+		b3Add( v->localBounds.upperBound, v->geometryPadding ) };
 }
 
 bool b3VoxelData_IsSolid( const b3VoxelData* v, b3Vec3i cell )
@@ -299,7 +319,7 @@ bool b3Voxel_GetLocalBounds( const b3VoxelData* v, b3AABB* out )
 {
 	if ( v->cellCount == 0 )
 		return false;
-	*out = v->localBounds;
+	*out = b3VoxelData_GetBounds( v );
 	return true;
 }
 
@@ -314,30 +334,28 @@ static inline bool b3Voxel_aabbIntersects( const b3AABB* a, const b3AABB* b )
 	return true;
 }
 
-int b3Voxel_QueryCells( const b3VoxelData* v, b3AABB queryLocal, b3Vec3i* out, int cap )
+static int b3Voxel_QueryCellsInternal( const b3VoxelData* v, b3AABB queryLocal, b3Vec3i* out, int cap,
+	b3VoxelCellQueryFcn* visitor, void* context )
 {
 	if ( v->cellCount == 0 || cap <= 0 )
 		return 0;
 
 	b3AABB clip;
-	clip.lowerBound.x = b3MaxFloat( queryLocal.lowerBound.x, v->localBounds.lowerBound.x );
-	clip.lowerBound.y = b3MaxFloat( queryLocal.lowerBound.y, v->localBounds.lowerBound.y );
-	clip.lowerBound.z = b3MaxFloat( queryLocal.lowerBound.z, v->localBounds.lowerBound.z );
-	clip.upperBound.x = b3MinFloat( queryLocal.upperBound.x, v->localBounds.upperBound.x );
-	clip.upperBound.y = b3MinFloat( queryLocal.upperBound.y, v->localBounds.upperBound.y );
-	clip.upperBound.z = b3MinFloat( queryLocal.upperBound.z, v->localBounds.upperBound.z );
+	b3AABB bounds = b3VoxelData_GetBounds( v );
+	clip.lowerBound = b3Max( queryLocal.lowerBound, bounds.lowerBound );
+	clip.upperBound = b3Min( queryLocal.upperBound, bounds.upperBound );
 	if ( clip.lowerBound.x > clip.upperBound.x || clip.lowerBound.y > clip.upperBound.y ||
 		 clip.lowerBound.z > clip.upperBound.z )
 		return 0;
 
 	const float eps = 1e-6f;
 	float s = v->voxelSize, inv = v->invVoxelSize;
-	int gMinX = (int)ceilf( clip.lowerBound.x * inv - 0.5f - eps );
-	int gMinY = (int)ceilf( clip.lowerBound.y * inv - 0.5f - eps );
-	int gMinZ = (int)ceilf( clip.lowerBound.z * inv - 0.5f - eps );
-	int gMaxX = (int)floorf( clip.upperBound.x * inv + 0.5f + eps );
-	int gMaxY = (int)floorf( clip.upperBound.y * inv + 0.5f + eps );
-	int gMaxZ = (int)floorf( clip.upperBound.z * inv + 0.5f + eps );
+	int gMinX = (int)ceilf( ( clip.lowerBound.x - v->geometryPadding.x ) * inv - 0.5f - eps );
+	int gMinY = (int)ceilf( ( clip.lowerBound.y - v->geometryPadding.y ) * inv - 0.5f - eps );
+	int gMinZ = (int)ceilf( ( clip.lowerBound.z - v->geometryPadding.z ) * inv - 0.5f - eps );
+	int gMaxX = (int)floorf( ( clip.upperBound.x + v->geometryPadding.x ) * inv + 0.5f + eps );
+	int gMaxY = (int)floorf( ( clip.upperBound.y + v->geometryPadding.y ) * inv + 0.5f + eps );
+	int gMaxZ = (int)floorf( ( clip.upperBound.z + v->geometryPadding.z ) * inv + 0.5f + eps );
 	if ( gMinX > gMaxX || gMinY > gMaxY || gMinZ > gMaxZ )
 		return 0;
 
@@ -357,7 +375,9 @@ int b3Voxel_QueryCells( const b3VoxelData* v, b3AABB queryLocal, b3Vec3i* out, i
 				if ( ci < 0 )
 					continue;
 				const b3VoxelChunk* chunk = v->chunks + ci;
-				if ( !b3Voxel_aabbIntersects( &chunk->solidBounds, &clip ) )
+				b3AABB chunkBounds = { b3Sub( chunk->solidBounds.lowerBound, v->geometryPadding ),
+					b3Add( chunk->solidBounds.upperBound, v->geometryPadding ) };
+				if ( !b3Voxel_aabbIntersects( &chunkBounds, &clip ) )
 					continue;
 				int base[3] = { cx << B3_VOXEL_CHUNK_BITS, cy << B3_VOXEL_CHUNK_BITS, cz << B3_VOXEL_CHUNK_BITS };
 				for ( int k = 0; k < chunk->occupiedCount; ++k )
@@ -366,8 +386,15 @@ int b3Voxel_QueryCells( const b3VoxelData* v, b3AABB queryLocal, b3Vec3i* out, i
 					b3Vec3i g = { base[0] + lc.x, base[1] + lc.y, base[2] + lc.z };
 					b3AABB cellBox = { { g.x * s - half, g.y * s - half, g.z * s - half },
 									   { g.x * s + half, g.y * s + half, g.z * s + half } };
+					cellBox.lowerBound = b3Sub( cellBox.lowerBound, v->geometryPadding );
+					cellBox.upperBound = b3Add( cellBox.upperBound, v->geometryPadding );
 					if ( !b3Voxel_aabbIntersects( &cellBox, &clip ) )
 						continue;
+					if ( visitor )
+					{
+						if ( !visitor( g, context ) ) return n;
+						continue;
+					}
 					if ( n < cap )
 						out[n] = g;
 					n++;
@@ -378,6 +405,31 @@ int b3Voxel_QueryCells( const b3VoxelData* v, b3AABB queryLocal, b3Vec3i* out, i
 		}
 	}
 	return n;
+}
+
+int b3Voxel_QueryCells( const b3VoxelData* v, b3AABB queryLocal, b3Vec3i* out, int cap )
+{
+	return b3Voxel_QueryCellsInternal( v, queryLocal, out, cap, NULL, NULL );
+}
+
+void b3Voxel_VisitCells( const b3VoxelData* v, b3AABB queryLocal, b3VoxelCellQueryFcn* visitor, void* context )
+{
+	b3Voxel_QueryCellsInternal( v, queryLocal, NULL, INT32_MAX, visitor, context );
+}
+
+float b3Voxel_GetMinExtent( const b3VoxelData* v )
+{
+	float extent = 0.5f * v->voxelSize;
+	for ( int i = 0; i < v->geometryCount; ++i )
+	{
+		const b3VoxelGeometry* geometry = v->geometries + i;
+		for ( int j = 0; j < geometry->count; ++j )
+		{
+			b3Vec3 h = geometry->boxes[j].halfExtents;
+			extent = b3MinFloat( extent, b3MinFloat( h.x, b3MinFloat( h.y, h.z ) ) );
+		}
+	}
+	return extent;
 }
 
 static b3Vec3i b3Voxel_unpackChunk( uint64_t key )
@@ -474,23 +526,161 @@ b3MassData b3Voxel_ComputeMass( const b3VoxelData* v, float density )
 
 b3VoxelData* b3CreateVoxelDataEx( const b3Vec3i* cells, const uint16_t* geomIndices, int count, float voxelSize )
 {
-	B3_UNUSED( geomIndices );
-	return b3CreateVoxelData( cells, count, voxelSize );
+	b3VoxelData* v = b3CreateVoxelData( cells, count, voxelSize );
+	if ( v && geomIndices ) b3Voxel_AddCellsEx( v, cells, geomIndices, count );
+	return v;
 }
 
 int b3VoxelData_AddGeometry( b3VoxelData* voxels, const b3VoxelSubBox* boxes, int count )
 {
-	B3_UNUSED( voxels );
-	B3_UNUSED( boxes );
-	B3_UNUSED( count );
-	return 0;
+	if ( voxels == NULL || boxes == NULL || count <= 0 || voxels->geometryCount >= UINT16_MAX ) return 0;
+	for ( int i = 0; i < count; ++i )
+	{
+		if ( !b3IsValidVec3( boxes[i].center ) || !b3IsValidVec3( boxes[i].halfExtents ) ||
+			 boxes[i].halfExtents.x <= 0 || boxes[i].halfExtents.y <= 0 || boxes[i].halfExtents.z <= 0 ) return 0;
+	}
+	if ( voxels->geometryCount == voxels->geometryCapacity )
+	{
+		int capacity = voxels->geometryCapacity ? 2 * voxels->geometryCapacity : 8;
+		b3VoxelGeometry* grown = (b3VoxelGeometry*)b3Alloc( (size_t)capacity * sizeof( b3VoxelGeometry ) );
+		if ( voxels->geometries )
+		{
+			memcpy( grown, voxels->geometries, (size_t)voxels->geometryCount * sizeof( b3VoxelGeometry ) );
+			b3Free( voxels->geometries, (size_t)voxels->geometryCapacity * sizeof( b3VoxelGeometry ) );
+		}
+		voxels->geometries = grown;
+		voxels->geometryCapacity = capacity;
+	}
+	b3VoxelGeometry* geometry = voxels->geometries + voxels->geometryCount++;
+	geometry->boxes = (b3VoxelSubBox*)b3Alloc( (size_t)count * sizeof( b3VoxelSubBox ) );
+	memcpy( geometry->boxes, boxes, (size_t)count * sizeof( b3VoxelSubBox ) );
+	geometry->count = count;
+	float half = 0.5f * voxels->voxelSize;
+	for ( int i = 0; i < count; ++i )
+	{
+		b3Vec3 extent = b3Add( b3Abs( boxes[i].center ), boxes[i].halfExtents );
+		voxels->geometryPadding = b3Max( voxels->geometryPadding, b3Sub( extent, (b3Vec3){ half, half, half } ) );
+	}
+	return voxels->geometryCount;
 }
 
 uint16_t b3VoxelData_GetCellGeometry( const b3VoxelData* voxels, b3Vec3i cell )
 {
-	B3_UNUSED( voxels );
-	B3_UNUSED( cell );
-	return 0;
+	if ( voxels == NULL ) return 0;
+	int ci = b3Voxel_findChunk( voxels, b3Voxel_packChunk( b3Voxel_chunkOf( cell ) ) );
+	if ( ci < 0 ) return 0;
+	const b3VoxelChunk* chunk = voxels->chunks + ci;
+	int li = b3Voxel_localIndex( cell.x & 15, cell.y & 15, cell.z & 15 );
+	return chunk->solid[li] && chunk->geometry ? chunk->geometry[li] : 0;
+}
+
+bool b3Voxel_HasGeometry( const b3VoxelData* v )
+{
+	return v && v->geometryCount > 0;
+}
+
+b3Vec3 b3Voxel_GetGeometryPadding( const b3VoxelData* v )
+{
+	return v->geometryPadding;
+}
+
+int b3Voxel_GetCellBoxes( const b3VoxelData* v, b3Vec3i cell, b3VoxelSubBox* fallback, const b3VoxelSubBox** boxes )
+{
+	uint16_t index = v->geometryCount > 0 ? b3VoxelData_GetCellGeometry( v, cell ) : 0;
+	if ( index > 0 && index <= v->geometryCount )
+	{
+		const b3VoxelGeometry* geometry = v->geometries + index - 1;
+		*boxes = geometry->boxes;
+		return geometry->count;
+	}
+	float h = 0.5f * v->voxelSize;
+	*fallback = (b3VoxelSubBox){ b3Vec3_zero, { h, h, h } };
+	*boxes = fallback;
+	return 1;
+}
+
+bool b3Voxel_IsInternalFace( const b3VoxelData* voxel, b3Vec3i cell, b3VoxelSubBox box, b3AABB patch, b3Vec3 normal )
+{
+	float n[3] = { normal.x, normal.y, normal.z };
+	float lo[3] = { patch.lowerBound.x, patch.lowerBound.y, patch.lowerBound.z };
+	float hi[3] = { patch.upperBound.x, patch.upperBound.y, patch.upperBound.z };
+	float c[3] = { box.center.x, box.center.y, box.center.z };
+	float h[3] = { box.halfExtents.x, box.halfExtents.y, box.halfExtents.z };
+	int coord[3] = { cell.x, cell.y, cell.z };
+	int axis = b3AbsFloat( n[0] ) >= b3AbsFloat( n[1] ) ? 0 : 1;
+	axis = b3AbsFloat( n[axis] ) >= b3AbsFloat( n[2] ) ? axis : 2;
+	float sign = n[axis] >= 0.0f ? 1.0f : -1.0f;
+	float size = voxel->voxelSize;
+	float face = coord[axis] * size + c[axis] + sign * h[axis];
+	float boundary = ( coord[axis] + 0.5f * sign ) * size;
+	float tolerance = B3_LINEAR_SLOP;
+	if ( b3AbsFloat( face - boundary ) > tolerance || lo[axis] > face + tolerance || hi[axis] < face - tolerance )
+	{
+		return false;
+	}
+	coord[axis] += sign > 0.0f ? 1 : -1;
+	b3Vec3i neighbor = { coord[0], coord[1], coord[2] };
+	if ( !b3VoxelData_IsSolid( voxel, neighbor ) )
+	{
+		return false;
+	}
+	b3VoxelSubBox fallback;
+	const b3VoxelSubBox* boxes;
+	int count = b3Voxel_GetCellBoxes( voxel, neighbor, &fallback, &boxes );
+	for ( int i = 0; i < count; ++i )
+	{
+		float center[3] = { boxes[i].center.x, boxes[i].center.y, boxes[i].center.z };
+		float half[3] = { boxes[i].halfExtents.x, boxes[i].halfExtents.y, boxes[i].halfExtents.z };
+		bool covered = true;
+		for ( int j = 0; j < 3; ++j )
+		{
+			float lower = coord[j] * size + center[j] - half[j];
+			float upper = coord[j] * size + center[j] + half[j];
+			if ( j == axis )
+			{
+				covered &= sign > 0.0f ? lower <= face + tolerance && upper > face + tolerance :
+					upper >= face - tolerance && lower < face - tolerance;
+			}
+			else
+			{
+				covered &= lower - tolerance <= lo[j] && hi[j] <= upper + tolerance;
+			}
+		}
+		if ( covered )
+		{
+			return true;
+		}
+	}
+	return false;
+}
+
+bool b3Voxel_AddCellsEx( b3VoxelData* v, const b3Vec3i* cells, const uint16_t* geomIndices, int count )
+{
+	bool changed = b3Voxel_AddCells( v, cells, count );
+	if ( v == NULL || cells == NULL || count <= 0 ) return changed;
+	bool geometryChanged = false;
+	for ( int i = 0; i < count; ++i )
+	{
+		int ci = b3Voxel_findChunk( v, b3Voxel_packChunk( b3Voxel_chunkOf( cells[i] ) ) );
+		if ( ci < 0 ) continue;
+		b3VoxelChunk* chunk = v->chunks + ci;
+		int li = b3Voxel_localIndex( cells[i].x & 15, cells[i].y & 15, cells[i].z & 15 );
+		uint16_t index = geomIndices ? geomIndices[i] : 0;
+		if ( index != 0 && chunk->geometry == NULL )
+			chunk->geometry = (uint16_t*)b3AllocZeroed( B3_VOXEL_CHUNK_CELLS * sizeof( uint16_t ) );
+		if ( chunk->geometry && chunk->geometry[li] != index )
+		{
+			chunk->geometry[li] = index;
+			changed = true;
+			geometryChanged = true;
+		}
+	}
+	if ( geometryChanged )
+	{
+		v->hash = v->hash * 16777619u + 1u;
+		if ( v->hash == 0 ) v->hash = 1;
+	}
+	return changed;
 }
 
 bool b3Voxel_RemoveCells( b3VoxelData* v, const b3Vec3i* cells, int count )
@@ -511,6 +701,7 @@ bool b3Voxel_RemoveCells( b3VoxelData* v, const b3Vec3i* cells, int count )
 		if ( !chunk->solid[li] )
 			continue;
 		chunk->solid[li] = 0;
+		if ( chunk->geometry ) chunk->geometry[li] = 0;
 		for ( int k = 0; k < chunk->occupiedCount; ++k )
 		{
 			b3Vec3i c = chunk->occupied[k];
@@ -596,6 +787,7 @@ bool b3Voxel_AddCells( b3VoxelData* v, const b3Vec3i* cells, int count )
 		b3Vec3 center = { cell.x * v->voxelSize, cell.y * v->voxelSize, cell.z * v->voxelSize };
 		b3Vec3 extents = { half, half, half };
 		b3Vec3 lo = b3Sub( center, extents ), hi = b3Add( center, extents );
+		// Empty chunks retain their hash slot so additions can reuse their storage.
 		if ( chunk->occupiedCount == 1 ) chunk->solidBounds = (b3AABB){ lo, hi };
 		else
 		{

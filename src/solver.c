@@ -20,7 +20,6 @@
 #include "sensor.h"
 #include "shape.h"
 #include "solver_set.h"
-#include "voxel_shape.h" // b3RayCastVoxel
 
 #include <float.h>
 #include <limits.h>
@@ -30,6 +29,89 @@
 // these are useful for solver testing
 #define ITERATIONS 1
 #define RELAX_ITERATIONS 1
+
+static int b3PoweredJointRoot( int* parent, int index )
+{
+	while ( parent[index] != index )
+	{
+		parent[index] = parent[parent[index]];
+		index = parent[index];
+	}
+	return index;
+}
+
+static int b3PoweredBodyIndex( const b3World* world, int bodyId )
+{
+	const b3Body* body = world->bodies.data + bodyId;
+	return body->type == b3_dynamicBody && body->setIndex == b3_awakeSet ? body->localIndex : B3_NULL_INDEX;
+}
+
+static void b3UnionPoweredContact( const b3World* world, int* parent, int contactId )
+{
+	const b3Contact* contact = world->contacts.data + contactId;
+	int a = b3PoweredBodyIndex( world, contact->edges[0].bodyId );
+	int b = b3PoweredBodyIndex( world, contact->edges[1].bodyId );
+	if ( a == B3_NULL_INDEX || b == B3_NULL_INDEX ) return;
+	a = b3PoweredJointRoot( parent, a );
+	b = b3PoweredJointRoot( parent, b );
+	parent[b3MaxInt( a, b )] = b3MinInt( a, b );
+}
+
+static void b3MarkPoweredArticulations( b3StepContext* context )
+{
+	if ( !context->enableJointMotorProjection ) return;
+	b3World* world = context->world;
+	int count = world->solverSets.data[b3_awakeSet].bodySims.count;
+	int* work = b3StackAlloc( &world->stack, 2 * count * sizeof( int ), "powered joint components" );
+	int* parent = work;
+	int* powered = work + count;
+	for ( int i = 0; i < count; ++i )
+	{
+		parent[i] = i;
+		powered[i] = 0;
+		context->sims[i].flags &= ~b3_poweredArticulation;
+	}
+	for ( int color = 0; color < B3_GRAPH_COLOR_COUNT; ++color )
+	{
+		const b3GraphColor* graphColor = context->graph->colors + color;
+		for ( int i = 0; i < graphColor->jointSims.count; ++i )
+		{
+			const b3JointSim* joint = graphColor->jointSims.data + i;
+			int a = b3PoweredBodyIndex( world, joint->bodyIdA );
+			int b = b3PoweredBodyIndex( world, joint->bodyIdB );
+			if ( a == B3_NULL_INDEX || b == B3_NULL_INDEX ) continue;
+			a = b3PoweredJointRoot( parent, a );
+			b = b3PoweredJointRoot( parent, b );
+			parent[b3MaxInt( a, b )] = b3MinInt( a, b );
+		}
+		for ( int i = 0; i < graphColor->contacts.count; ++i )
+		{
+			b3UnionPoweredContact( world, parent, graphColor->contacts.data[i].contactId );
+		}
+		for ( int i = 0; i < graphColor->convexContacts.count; ++i )
+		{
+			b3UnionPoweredContact( world, parent, graphColor->convexContacts.data[i] );
+		}
+	}
+	for ( int color = 0; color < B3_GRAPH_COLOR_COUNT; ++color )
+	{
+		const b3GraphColor* graphColor = context->graph->colors + color;
+		for ( int i = 0; i < graphColor->jointSims.count; ++i )
+		{
+			const b3JointSim* joint = graphColor->jointSims.data + i;
+			if ( !b3JointNeedsMotorProjection( joint ) ) continue;
+			int a = b3PoweredBodyIndex( world, joint->bodyIdA );
+			int b = b3PoweredBodyIndex( world, joint->bodyIdB );
+			if ( a != B3_NULL_INDEX ) powered[b3PoweredJointRoot( parent, a )] = 1;
+			if ( b != B3_NULL_INDEX ) powered[b3PoweredJointRoot( parent, b )] = 1;
+		}
+	}
+	for ( int i = 0; i < count; ++i )
+	{
+		if ( powered[b3PoweredJointRoot( parent, i )] ) context->sims[i].flags |= b3_poweredArticulation;
+	}
+	b3StackFree( &world->stack, work );
+}
 
 #if ( defined( __GNUC__ ) || defined( __clang__ ) ) && ( defined( __i386__ ) || defined( __x86_64__ ) )
 static void b3Pause( void )
@@ -543,7 +625,6 @@ typedef struct b3ContinuousContext
 	b3World* world;
 	b3BodySim* fastBodySim;
 	b3Shape* fastShape;
-	b3Vec3 centroid1, centroid2;
 	b3Sweep sweep;
 	// World base for re-centering sweeps. Keeps TOI in float precision far from the origin.
 	b3Pos base;
@@ -643,37 +724,8 @@ static bool b3ContinuousQueryCallback( int proxyId, uint64_t userData, void* con
 	b3Sweep sweepA = b3MakeRelativeSweep( bodySim, continuousContext->base );
 
 	// Time of impact versus shape. Supports all shape types
-	b3TOIOutput output;
-	if ( shape->type == b3_voxelShape )
-	{
-		output = ( b3TOIOutput ){ 0 };
-		output.fraction = continuousContext->fraction; // default: no earlier hit
-
-		b3BodySim* voxelSim = b3GetBodySim( world, body );
-		b3Transform xfVoxel = { b3SubPos( voxelSim->transform.p, continuousContext->base ), voxelSim->transform.q };
-		b3Vec3 o = b3InvTransformPoint( xfVoxel, continuousContext->centroid1 );
-		b3Vec3 e = b3InvTransformPoint( xfVoxel, continuousContext->centroid2 );
-		b3Vec3 d = b3Sub( e, o );
-		float len = b3Length( d );
-		if ( len > FLT_EPSILON )
-		{
-			b3RayCastInput input = { o, d, 1.0f };
-			b3CastOutput cast = b3RayCastVoxel( shape->voxel, &input );
-			if ( cast.hit )
-			{
-				float frac = cast.fraction - fastBodySim->minExtent / len;
-				if ( frac < 0.0f )
-					frac = 0.0f;
-				output.fraction = frac;
-				output.point = b3Lerp( continuousContext->centroid1, continuousContext->centroid2, cast.fraction );
-				output.normal = b3RotateVector( xfVoxel.q, cast.normal );
-			}
-		}
-	}
-	else
-	{
-		output = b3ShapeTimeOfImpact( shape, fastShape, &sweepA, &continuousContext->sweep, continuousContext->fraction );
-	}
+	b3TOIOutput output = b3ShapeTimeOfImpact( shape, fastShape, &sweepA, &continuousContext->sweep,
+		continuousContext->fraction );
 	if ( isSensor )
 	{
 		// Only accept a sensor hit that is sooner than the current solid hit.
@@ -742,10 +794,6 @@ static void b3SolveContinuous( b3World* world, int bodySimIndex, b3TaskContext* 
 
 	b3Sweep sweep = b3MakeRelativeSweep( fastBodySim, base );
 
-	b3Transform xf1;
-	xf1.q = sweep.q1;
-	xf1.p = b3Sub( sweep.c1, b3RotateVector( sweep.q1, sweep.localCenter ) );
-
 	b3Transform xf2;
 	xf2.q = sweep.q2;
 	xf2.p = b3Sub( sweep.c2, b3RotateVector( sweep.q2, sweep.localCenter ) );
@@ -771,8 +819,6 @@ static void b3SolveContinuous( b3World* world, int bodySimIndex, b3TaskContext* 
 		shapeId = fastShape->nextShapeId;
 
 		context.fastShape = fastShape;
-		context.centroid1 = b3TransformPoint( xf1, fastShape->localCentroid );
-		context.centroid2 = b3TransformPoint( xf2, fastShape->localCentroid );
 
 		b3AABB box1 = fastShape->aabb;
 		// xf2 is relative to the base, so translate the box back to world space, rounding outward
@@ -781,7 +827,7 @@ static void b3SolveContinuous( b3World* world, int bodySimIndex, b3TaskContext* 
 		// Store this to avoid double computation in the case there is no impact event
 		fastShape->aabb = box2;
 
-		if ( fastShape->type == b3_meshShape || fastShape->type == b3_heightShape || fastShape->type == b3_voxelShape )
+		if ( fastShape->type == b3_meshShape || fastShape->type == b3_heightShape )
 		{
 			continue;
 		}
@@ -792,7 +838,7 @@ static void b3SolveContinuous( b3World* world, int bodySimIndex, b3TaskContext* 
 			continue;
 		}
 
-		b3AABB sweptBox = b3AABB_Union( box1, box2 );
+		b3AABB sweptBox = b3AABB_Union( box1, b3OffsetAABB( b3ComputeSweptShapeAABB( fastShape, &sweep, 1.0f ), base ) );
 		b3DynamicTree_Query( staticTree, sweptBox, B3_DEFAULT_MASK_BITS, false, b3ContinuousQueryCallback, &context );
 
 		if ( isBullet )
@@ -1577,6 +1623,14 @@ static void b3SolverTask( void* taskContext )
 			{
 				b3SolveJoints_Direct( context, true, false );
 			}
+			if ( context->enableJointMotorProjection )
+			{
+				for ( int refinement = 0; refinement < 256; ++refinement )
+				{
+					if ( !b3SolveArticulatedContacts( context, true ) ) break;
+					b3SolvePoweredJoints_Direct( context, true );
+				}
+			}
 			profile->solveImpulses += b3GetMillisecondsAndReset( &ticks );
 			b3FlagJointEventsAfterDirect( context );
 
@@ -1611,6 +1665,15 @@ static void b3SolverTask( void* taskContext )
 				graphSyncIndex += 1;
 			}
 
+			if ( context->enableJointMotorProjection )
+			{
+				b3SolvePoweredJoints_Direct( context, false );
+				for ( int refinement = 0; refinement < 256; ++refinement )
+				{
+					if ( !b3SolveArticulatedContacts( context, false ) ) break;
+					b3SolvePoweredJoints_Direct( context, false );
+				}
+			}
 			profile->relaxImpulses += b3GetMillisecondsAndReset( &ticks );
 		}
 
@@ -2116,6 +2179,7 @@ void b3Solve( b3World* world, b3StepContext* stepContext )
 
 		stepContext->graph = graph;
 		stepContext->enableJointMotorProjection = enableJointMotorProjection;
+		b3MarkPoweredArticulations( stepContext );
 		stepContext->activeColorCount = activeColorCount;
 		stepContext->workerCount = workerCount;
 		stepContext->stageCount = stageCount;

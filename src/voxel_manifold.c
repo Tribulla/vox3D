@@ -262,7 +262,6 @@ static int b3VoxelCollideConvex( const b3VoxelData* v, const b3Shape* convex, b3
 								 int maxContacts, b3VoxelContact* out, b3Arena* arena )
 {
 	float vs = b3Voxel_GetVoxelSize( v );
-	float h = 0.5f * vs;
 
 	b3Vec3 lo, hi;
 	if ( convex->type == b3_sphereShape )
@@ -301,51 +300,59 @@ static int b3VoxelCollideConvex( const b3VoxelData* v, const b3Shape* convex, b3
 	int nacc = 0;
 	for ( int a = 0; a < ncells; ++a )
 	{
-		b3Vec3 center = { cells[a].x * vs, cells[a].y * vs, cells[a].z * vs };
-		b3BoxHull cellHull = b3MakeOffsetBoxHull( h, h, h, center );
-
-		b3LocalManifoldPoint pts[8];
-		b3LocalManifold m = { 0 };
-		m.points = pts;
-
-		switch ( convex->type )
+		b3VoxelSubBox fallback;
+		const b3VoxelSubBox* boxes;
+		int nb = b3Voxel_GetCellBoxes( v, cells[a], &fallback, &boxes );
+		for ( int sub = 0; sub < nb; ++sub )
 		{
-			case b3_sphereShape:
-			{
-				b3SimplexCache sc = { 0 };
-				b3CollideHullAndSphere( &m, 8, &cellHull.base, &convex->sphere, btoa, &sc );
-				break;
-			}
-			case b3_capsuleShape:
-			{
-				b3SimplexCache sc = { 0 };
-				b3CollideHullAndCapsule( &m, 8, &cellHull.base, &convex->capsule, btoa, &sc );
-				break;
-			}
-			case b3_hullShape:
-			{
-				b3SATCache sc = { 0 };
-				b3CollideHulls( &m, 8, &cellHull.base, convex->hull, btoa, &sc );
-				break;
-			}
-			default:
-				return nacc;
-		}
+			b3Vec3 center = b3Add( (b3Vec3){ cells[a].x * vs, cells[a].y * vs, cells[a].z * vs }, boxes[sub].center );
+			b3Vec3 h = boxes[sub].halfExtents;
+			b3BoxHull cellHull = b3MakeOffsetBoxHull( h.x, h.y, h.z, center );
 
-		uint32_t cellId = b3Voxel_cellId( cells[a] );
-		for ( int k = 0; k < m.pointCount; ++k )
-		{
-			if ( m.points[k].separation >= contactDistance )
-				continue; // outside the contact band
+			b3LocalManifoldPoint pts[8];
+			b3LocalManifold m = { 0 };
+			m.points = pts;
 
-			b3VoxelContact c;
-			c.normal = b3Neg( m.normal ); // cell -> convex (A -> B) flipped to B -> A
-			c.initialPenetration = -m.points[k].separation;
-			c.penetrationDepth = c.initialPenetration > 0.0f ? c.initialPenetration : 0.0f;
-			c.body0Point = m.points[k].point;
-			c.body1Point = m.points[k].point;
-			c.featureId = cellId ^ ( b3MakeFeatureId( m.points[k].pair ) * 2654435761u );
-			b3Voxel_addReduced( &c, out, &nacc, maxContacts );
+			switch ( convex->type )
+			{
+				case b3_sphereShape:
+				{
+					b3SimplexCache sc = { 0 };
+					b3CollideHullAndSphere( &m, 8, &cellHull.base, &convex->sphere, btoa, &sc );
+					break;
+				}
+				case b3_capsuleShape:
+				{
+					b3SimplexCache sc = { 0 };
+					b3CollideHullAndCapsule( &m, 8, &cellHull.base, &convex->capsule, btoa, &sc );
+					break;
+				}
+				case b3_hullShape:
+				{
+					b3SATCache sc = { 0 };
+					b3CollideHulls( &m, 8, &cellHull.base, convex->hull, btoa, &sc );
+					break;
+				}
+				default:
+					return nacc;
+			}
+
+			uint32_t cellId = b3Voxel_cellId( cells[a] );
+			for ( int k = 0; k < m.pointCount; ++k )
+			{
+				if ( m.points[k].separation >= contactDistance )
+					continue; // outside the contact band
+
+				b3VoxelContact c;
+				c.normal = b3Neg( m.normal ); // cell -> convex (A -> B) flipped to B -> A
+				c.initialPenetration = -m.points[k].separation;
+				c.penetrationDepth = c.initialPenetration > 0.0f ? c.initialPenetration : 0.0f;
+				c.body0Point = m.points[k].point;
+				c.body1Point = m.points[k].point;
+				c.featureId = cellId ^ ( b3MakeFeatureId( m.points[k].pair ) * 2654435761u );
+				c.featureId ^= (uint32_t)sub * 0x27d4eb2du;
+				b3Voxel_addReduced( &c, out, &nacc, maxContacts );
+			}
 		}
 	}
 	return nacc;

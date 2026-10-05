@@ -69,10 +69,12 @@ typedef struct b3VoxelFaceFilter
 	b3Vec3i cell1;
 	b3Transform xf0;
 	b3Transform xf1;
+	b3VoxelSubBox box0;
+	b3VoxelSubBox box1;
+	bool fullCubes;
 } b3VoxelFaceFilter;
 
-static bool b3Voxel_facesExposed( const b3VoxelData* v0, b3Vec3i cell0, b3Transform xf0, const b3VoxelData* v1,
-								   b3Vec3i cell1, b3Transform xf1, b3Vec3 normalWorld );
+static bool b3Voxel_facesExposed( const b3VoxelFaceFilter* filter, b3Vec3 normalWorld );
 
 static bool b3Obb_testAxis( b3ObbSat* sat, const b3VoxelOBB* o0, const b3VoxelOBB* o1, b3Vec3 delta, b3Vec3 a, int srcBox,
 							bool isEdge, float contactDist, const b3VoxelFaceFilter* filter )
@@ -109,8 +111,7 @@ static bool b3Obb_testAxis( b3ObbSat* sat, const b3VoxelOBB* o0, const b3VoxelOB
 	bool improve = isEdge ? ( overlap + 1e-4f < sat->minOverlap ) : ( overlap < sat->minOverlap + 1e-4f );
 	if ( !improve )
 		return true;
-	if ( filter && !b3Voxel_facesExposed( filter->v0, filter->cell0, filter->xf0,
-			filter->v1, filter->cell1, filter->xf1, normal ) )
+	if ( filter && !b3Voxel_facesExposed( filter, normal ) )
 		return true;
 	sat->minOverlap = overlap;
 	sat->minAxis = normal;
@@ -463,6 +464,14 @@ static b3VoxelOBB b3Voxel_cellOBB( b3Vec3i cell, float voxelSize, b3Transform xf
 	return o;
 }
 
+static b3VoxelOBB b3Voxel_subBoxOBB( b3Vec3i cell, float voxelSize, b3VoxelSubBox box, b3Transform xf )
+{
+	b3VoxelOBB o = b3Voxel_cellOBB( cell, voxelSize, xf );
+	o.center = b3Add( o.center, b3RotateVector( xf.q, box.center ) );
+	o.half = box.halfExtents;
+	return o;
+}
+
 static b3Vec3i b3Voxel_dominantOffset( b3Vec3 d )
 {
 	float ax = b3AbsFloat( d.x ), ay = b3AbsFloat( d.y ), az = b3AbsFloat( d.z );
@@ -473,16 +482,33 @@ static b3Vec3i b3Voxel_dominantOffset( b3Vec3 d )
 	return (b3Vec3i){ 0, 0, d.z >= 0.0f ? 1 : -1 };
 }
 
-static bool b3Voxel_facesExposed( const b3VoxelData* v0, b3Vec3i cell0, b3Transform xf0, const b3VoxelData* v1,
-								   b3Vec3i cell1, b3Transform xf1, b3Vec3 normalWorld )
+static bool b3Voxel_facesExposed( const b3VoxelFaceFilter* filter, b3Vec3 normalWorld )
 {
+	const b3VoxelData* v0 = filter->v0;
+	const b3VoxelData* v1 = filter->v1;
+	b3Vec3i cell0 = filter->cell0, cell1 = filter->cell1;
+	b3Transform xf0 = filter->xf0, xf1 = filter->xf1;
 	b3Vec3 d0 = b3InvRotateVector( xf0.q, b3Neg( normalWorld ) );
-	b3Vec3i o0 = b3Voxel_dominantOffset( d0 );
-	if ( b3VoxelData_IsSolid( v0, (b3Vec3i){ cell0.x + o0.x, cell0.y + o0.y, cell0.z + o0.z } ) )
-		return false;
 	b3Vec3 d1 = b3InvRotateVector( xf1.q, normalWorld );
+	if ( !filter->fullCubes )
+	{
+		float size0 = b3Voxel_GetVoxelSize( v0 ), size1 = b3Voxel_GetVoxelSize( v1 );
+		b3Vec3 c0 = b3Add( (b3Vec3){ cell0.x * size0, cell0.y * size0, cell0.z * size0 }, filter->box0.center );
+		b3Vec3 c1 = b3Add( (b3Vec3){ cell1.x * size1, cell1.y * size1, cell1.z * size1 }, filter->box1.center );
+		b3AABB patch0 = { b3Sub( c0, filter->box0.halfExtents ), b3Add( c0, filter->box0.halfExtents ) };
+		b3AABB patch1 = { b3Sub( c1, filter->box1.halfExtents ), b3Add( c1, filter->box1.halfExtents ) };
+		return !b3Voxel_IsInternalFace( v0, cell0, filter->box0, patch0, d0 ) &&
+			!b3Voxel_IsInternalFace( v1, cell1, filter->box1, patch1, d1 );
+	}
+	b3Vec3i o0 = b3Voxel_dominantOffset( d0 );
+	b3Vec3i neighbor0 = { cell0.x + o0.x, cell0.y + o0.y, cell0.z + o0.z };
+	if ( b3VoxelData_IsSolid( v0, neighbor0 ) &&
+		( !b3Voxel_HasGeometry( v0 ) || b3VoxelData_GetCellGeometry( v0, neighbor0 ) == 0 ) )
+		return false;
 	b3Vec3i o1 = b3Voxel_dominantOffset( d1 );
-	if ( b3VoxelData_IsSolid( v1, (b3Vec3i){ cell1.x + o1.x, cell1.y + o1.y, cell1.z + o1.z } ) )
+	b3Vec3i neighbor1 = { cell1.x + o1.x, cell1.y + o1.y, cell1.z + o1.z };
+	if ( b3VoxelData_IsSolid( v1, neighbor1 ) &&
+		( !b3Voxel_HasGeometry( v1 ) || b3VoxelData_GetCellGeometry( v1, neighbor1 ) == 0 ) )
 		return false;
 	return true;
 }
@@ -586,6 +612,7 @@ int b3VoxelCollide( const b3VoxelData* v0, b3Transform xf0, const b3VoxelData* v
 
 	float vs0 = b3Voxel_GetVoxelSize( v0 );
 	float vs1 = b3Voxel_GetVoxelSize( v1 );
+	bool hasGeometry0 = b3Voxel_HasGeometry( v0 ), hasGeometry1 = b3Voxel_HasGeometry( v1 );
 
 	// Solid cells of v0 in the region v1 could reach.
 	b3AABB q0 = b3Voxel_mapBounds( b3Voxel_expandB( wb1, contactDistance ), xf0, true );
@@ -601,30 +628,50 @@ int b3VoxelCollide( const b3VoxelData* v0, b3Transform xf0, const b3VoxelData* v
 
 	for ( int a = 0; a < nc0; ++a )
 	{
-		b3VoxelOBB obb0 = b3Voxel_cellOBB( cells0[a], vs0, xf0 );
-		b3AABB ewb0 = b3Voxel_expandB( b3VoxelOBB_Bounds( &obb0 ), contactDistance );
-		b3AABB q1 = b3Voxel_mapBounds( ewb0, xf1, true );
-		int nc1 = b3Voxel_QueryCells( v1, q1, cells1, 256 );
-
-		for ( int b = 0; b < nc1; ++b )
+		b3VoxelSubBox fallback0;
+		const b3VoxelSubBox* boxes0;
+		int nb0 = b3Voxel_GetCellBoxes( v0, cells0[a], &fallback0, &boxes0 );
+		bool fullCube0 = !hasGeometry0 || b3VoxelData_GetCellGeometry( v0, cells0[a] ) == 0;
+		for ( int sub0 = 0; sub0 < nb0; ++sub0 )
 		{
-			b3VoxelOBB obb1 = b3Voxel_cellOBB( cells1[b], vs1, xf1 );
-			if ( !b3Voxel_isect( ewb0, b3VoxelOBB_Bounds( &obb1 ) ) )
-				continue;
+			b3VoxelOBB obb0 = fullCube0 ? b3Voxel_cellOBB( cells0[a], vs0, xf0 ) :
+				b3Voxel_subBoxOBB( cells0[a], vs0, boxes0[sub0], xf0 );
+			b3AABB ewb0 = b3Voxel_expandB( b3VoxelOBB_Bounds( &obb0 ), contactDistance );
+			b3AABB q1 = b3Voxel_mapBounds( ewb0, xf1, true );
+			int nc1 = b3Voxel_QueryCells( v1, q1, cells1, 256 );
 
-			b3VoxelContact c[4];
-			// Request the face-clip manifold (up to 4 corner points) per voxel pair, not a single
-			// support point. A single point lands at the voxel FACE CENTRE, so an N-wide resting
-			// face gets a support polygon of span (N-1)*voxelSize and a single-voxel contact
-			// collapses to one central point with ZERO base -> free to rock/tip. The clipped
-			// corners reach the true face edges, restoring a full-width support base. Edge and
-			// deep-overlap contacts still fall back to the single-point branch inside CollideOBB.
-			b3VoxelFaceFilter filter = { v0, v1, cells0[a], cells1[b], xf0, xf1 };
-			int nc = b3VoxelCollideOBBFiltered( &obb0, &obb1, contactDistance, 4, c, &filter );
-			for ( int k = 0; k < nc; ++k )
+			for ( int b = 0; b < nc1; ++b )
 			{
-				c[k].featureId = b3Voxel_pairId( cells0[a], cells1[b], k );
-				b3Voxel_addReduced( &c[k], acc, &nacc, maxContacts );
+				b3VoxelSubBox fallback1;
+				const b3VoxelSubBox* boxes1;
+				int nb1 = b3Voxel_GetCellBoxes( v1, cells1[b], &fallback1, &boxes1 );
+				bool fullCube1 = !hasGeometry1 || b3VoxelData_GetCellGeometry( v1, cells1[b] ) == 0;
+				for ( int sub1 = 0; sub1 < nb1; ++sub1 )
+				{
+					b3VoxelOBB obb1 = fullCube1 ? b3Voxel_cellOBB( cells1[b], vs1, xf1 ) :
+						b3Voxel_subBoxOBB( cells1[b], vs1, boxes1[sub1], xf1 );
+					if ( !b3Voxel_isect( ewb0, b3VoxelOBB_Bounds( &obb1 ) ) )
+						continue;
+
+					b3VoxelContact c[4];
+					// Request the face-clip manifold (up to 4 corner points) per voxel pair, not a single
+					// support point. A single point lands at the voxel FACE CENTRE, so an N-wide resting
+					// face gets a support polygon of span (N-1)*voxelSize and a single-voxel contact
+					// collapses to one central point with ZERO base -> free to rock/tip. The clipped
+					// corners reach the true face edges, restoring a full-width support base. Edge and
+					// deep-overlap contacts still fall back to the single-point branch inside CollideOBB.
+					// Partial faces are hidden only when their actual rectangle is
+					// covered, preserving exposed stair treads and recessed faces.
+					b3VoxelFaceFilter filter = { v0, v1, cells0[a], cells1[b], xf0, xf1,
+						boxes0[sub0], boxes1[sub1], fullCube0 && fullCube1 };
+					int nc = b3VoxelCollideOBBFiltered( &obb0, &obb1, contactDistance, 4, c, &filter );
+					for ( int k = 0; k < nc; ++k )
+					{
+						c[k].featureId = b3Voxel_pairId( cells0[a], cells1[b], k );
+						c[k].featureId ^= (uint32_t)sub0 * 0x27d4eb2du ^ (uint32_t)sub1 * 0x165667b1u;
+						b3Voxel_addReduced( &c[k], acc, &nacc, maxContacts );
+					}
+				}
 			}
 		}
 	}
@@ -640,6 +687,39 @@ int b3VoxelCollide( const b3VoxelData* v0, b3Transform xf0, const b3VoxelData* v
 // ---------------------------------------------------------------------------
 // Ray cast and overlap query (shape-local space).
 // ---------------------------------------------------------------------------
+
+static b3CastOutput b3Voxel_rayBox( const b3RayCastInput* input, b3Vec3 center, b3Vec3 half )
+{
+	b3CastOutput out = { 0 };
+	float enter = 0.0f, exit = input->maxFraction;
+	b3Vec3 normal = b3Normalize( b3Neg( input->translation ) );
+	for ( int a = 0; a < 3; ++a )
+	{
+		float o = ( &input->origin.x )[a] - ( &center.x )[a];
+		float d = ( &input->translation.x )[a];
+		float h = ( &half.x )[a];
+		if ( b3AbsFloat( d ) < 1e-12f )
+		{
+			if ( o < -h || o > h ) return out;
+			continue;
+		}
+		float t0 = ( -h - o ) / d, t1 = ( h - o ) / d;
+		if ( t0 > t1 ) { float tmp = t0; t0 = t1; t1 = tmp; }
+		if ( t0 > enter )
+		{
+			enter = t0;
+			normal = b3Vec3_zero;
+			( &normal.x )[a] = d > 0 ? -1.0f : 1.0f;
+		}
+		exit = b3MinFloat( exit, t1 );
+		if ( enter > exit ) return out;
+	}
+	out.hit = true;
+	out.fraction = enter;
+	out.normal = normal;
+	out.point = b3MulAdd( input->origin, enter, input->translation );
+	return out;
+}
 
 // Amanatides-Woo 3D DDA over the cell-centred grid. Cell c occupies
 // [c*s - 0.5s, c*s + 0.5s]; the grid coordinate u = p/s + 0.5 puts cell c at
@@ -734,7 +814,33 @@ b3CastOutput b3RayCastVoxel( const b3VoxelData* v, const b3RayCastInput* input )
 	int lastAxis = -1;
 	for ( int iter = 0; iter < 4096; ++iter )
 	{
-		if ( b3VoxelData_IsSolid( v, (b3Vec3i){ cell[0], cell[1], cell[2] } ) )
+		if ( b3Voxel_HasGeometry( v ) )
+		{
+			float end = b3MinFloat( tmax, b3MinFloat( tMax[0], b3MinFloat( tMax[1], tMax[2] ) ) );
+			b3Vec3 startPoint = b3MulAdd( p0, tEnter, d ), endPoint = b3MulAdd( p0, end, d );
+			b3AABB query = { b3Min( startPoint, endPoint ), b3Max( startPoint, endPoint ) };
+			b3Vec3i candidates[256];
+			int n = b3Voxel_QueryCells( v, query, candidates, 256 );
+			float closest = FLT_MAX;
+			for ( int i = 0; i < n; ++i )
+			{
+				b3VoxelSubBox fallback;
+				const b3VoxelSubBox* boxes;
+				int nb = b3Voxel_GetCellBoxes( v, candidates[i], &fallback, &boxes );
+				b3Vec3 cellCenter = { candidates[i].x * s, candidates[i].y * s, candidates[i].z * s };
+				for ( int sub = 0; sub < nb; ++sub )
+				{
+						b3CastOutput hit = b3Voxel_rayBox( input, b3Add( cellCenter, boxes[sub].center ), boxes[sub].halfExtents );
+						if ( hit.hit && hit.fraction >= tEnter - 1e-6f && hit.fraction <= end + 1e-6f && hit.fraction < closest )
+						{
+							out = hit;
+							closest = hit.fraction;
+						}
+				}
+			}
+			if ( out.hit ) return out;
+		}
+		else if ( b3VoxelData_IsSolid( v, (b3Vec3i){ cell[0], cell[1], cell[2] } ) )
 		{
 			out.hit = true;
 			out.fraction = tEnter;
@@ -812,24 +918,31 @@ bool b3OverlapVoxel( const b3VoxelData* v, b3Transform xf, const b3ShapeProxy* p
 
 	for ( int i = 0; i < n; ++i )
 	{
-		b3Vec3 c = { cells[i].x * s, cells[i].y * s, cells[i].z * s };
-		b3Vec3 corners[8];
-		for ( int k = 0; k < 8; ++k )
+		b3VoxelSubBox fallback;
+		const b3VoxelSubBox* boxes;
+		int nb = b3Voxel_GetCellBoxes( v, cells[i], &fallback, &boxes );
+		for ( int sub = 0; sub < nb; ++sub )
 		{
-			corners[k] = (b3Vec3){
-				c.x + ( ( k & 1 ) ? half : -half ),
-				c.y + ( ( k & 2 ) ? half : -half ),
-				c.z + ( ( k & 4 ) ? half : -half ),
-			};
-		}
+			b3Vec3 c = b3Add( (b3Vec3){ cells[i].x * s, cells[i].y * s, cells[i].z * s }, boxes[sub].center );
+			b3Vec3 h = boxes[sub].halfExtents;
+			b3Vec3 corners[8];
+			for ( int k = 0; k < 8; ++k )
+			{
+				corners[k] = (b3Vec3){
+					c.x + ( ( k & 1 ) ? h.x : -h.x ),
+					c.y + ( ( k & 2 ) ? h.y : -h.y ),
+					c.z + ( ( k & 4 ) ? h.z : -h.z ),
+				};
+			}
 
-		input.proxyA = (b3ShapeProxy){ corners, 8, 0.0f };
-		cache.count = 0;
+			input.proxyA = (b3ShapeProxy){ corners, 8, 0.0f };
+			cache.count = 0;
 
-		b3DistanceOutput output = b3ShapeDistance( &input, &cache, NULL, 0 );
-		if ( output.distance < tolerance )
-		{
-			return true;
+			b3DistanceOutput output = b3ShapeDistance( &input, &cache, NULL, 0 );
+			if ( output.distance < tolerance )
+			{
+				return true;
+			}
 		}
 	}
 

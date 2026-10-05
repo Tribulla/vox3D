@@ -25,7 +25,26 @@
 // s(t) = s0 + dot(cB0 - cA0, normal) + dot(dpB - dpA + rot(dqB, rB0) - rot(dqA, rA0), normal)
 // s_base = s0 + dot(cB0 - cA0, normal)
 
-// Prepare a mesh constraints
+static bool b3BodyHasPoweredJoint( const b3StepContext* context, const b3Body* body )
+{
+	return body->type == b3_dynamicBody && body->setIndex == b3_awakeSet &&
+		( context->sims[body->localIndex].flags & b3_poweredArticulation ) != 0;
+}
+
+static b3Softness b3ContactSoftness( const b3StepContext* context, const b3Contact* contact, b3Softness softness )
+{
+	if ( !context->enableJointMotorProjection ) return softness;
+	const b3Body* a = context->world->bodies.data + contact->edges[0].bodyId;
+	const b3Body* b = context->world->bodies.data + contact->edges[1].bodyId;
+	if ( b3BodyHasPoweredJoint( context, a ) || b3BodyHasPoweredJoint( context, b ) )
+	{
+		softness.massScale = 1.0f;
+		softness.impulseScale = 0.0f;
+	}
+	return softness;
+}
+
+// Prepare mesh constraints.
 void b3PrepareContacts_Mesh( b3SolverBlock block, b3StepContext* context )
 {
 	b3TracyCZoneNC( prepare_contact, "Prepare Contact", b3_colorYellow, true );
@@ -158,6 +177,8 @@ void b3PrepareContacts_Mesh( b3SolverBlock block, b3StepContext* context )
 			contactConstraint->rollingMass = b3InvertMatrix( b3AddMM( iA, iB ) );
 			contactConstraint->softness =
 				( contact->flags & b3_contactStaticFlag ) != 0 ? context->staticSoftness : context->contactSoftness;
+			contactConstraint->softness = b3ContactSoftness( context, contact, contactConstraint->softness );
+			contactConstraint->rigidJointContact = contactConstraint->softness.massScale == 1.0f;
 			contactConstraint->friction = contact->friction;
 			contactConstraint->restitution = contact->restitution;
 			contactConstraint->rollingResistance = contact->rollingResistance;
@@ -371,7 +392,7 @@ void b3WarmStartContacts_Mesh( b3SolverBlock block, b3StepContext* context )
 }
 
 // Merged normal and friction loops. This is much more stable for the Jenga stack.
-void b3SolveContacts_Mesh( b3SolverBlock block, b3StepContext* context, bool useBias )
+static void b3SolveContactsMeshInternal( b3SolverBlock block, b3StepContext* context, bool useBias, bool refinement )
 {
 	b3World* world = context->world;
 	b3GraphColor* color = world->constraintGraph.colors + block.colorIndex;
@@ -466,7 +487,7 @@ void b3SolveContacts_Mesh( b3SolverBlock block, b3StepContext* context, bool use
 				float newImpulse = b3MaxFloat( cp->normalImpulse + deltaImpulse, 0.0f );
 				deltaImpulse = newImpulse - cp->normalImpulse;
 				cp->normalImpulse = newImpulse;
-				cp->totalNormalImpulse += newImpulse;
+				cp->totalNormalImpulse += refinement ? deltaImpulse : newImpulse;
 
 				totalNormalImpulse += newImpulse;
 				totalTwistLimit += cp->leverArm * cp->normalImpulse;
@@ -580,6 +601,11 @@ void b3SolveContacts_Mesh( b3SolverBlock block, b3StepContext* context, bool use
 			stateB->angularVelocity = wB;
 		}
 	}
+}
+
+void b3SolveContacts_Mesh( b3SolverBlock block, b3StepContext* context, bool useBias )
+{
+	b3SolveContactsMeshInternal( block, context, useBias, false );
 }
 
 void b3ApplyRestitution_Mesh( b3SolverBlock block, b3StepContext* context )
@@ -1380,6 +1406,7 @@ typedef struct b3ContactConstraintWide
 	b3FloatW restitution;
 
 	b3Manifold* manifolds[B3_SIMD_WIDTH];
+	uint32_t rigidJointLanes;
 
 	// todo store the maximum point count per wide constraint
 	// to make this work I need zero initialization which is too
@@ -1665,6 +1692,7 @@ void b3PrepareContacts_Convex( b3SolverBlock block, b3StepContext* context )
 		for ( ; wideIndex < colorWideEndIndex; ++wideIndex )
 		{
 			b3ContactConstraintWide* constraint = wideBase + wideIndex;
+			constraint->rigidJointLanes = 0;
 			int localWideIndex = wideIndex - colorWideStart;
 
 			for ( int lane = 0; lane < B3_SIMD_WIDTH; ++lane )
@@ -1764,6 +1792,8 @@ void b3PrepareContacts_Convex( b3SolverBlock block, b3StepContext* context )
 				( (float*)&constraint->invIB.czz )[lane] = iB.cz.z;
 
 				b3Softness soft = ( indexA == B3_NULL_INDEX || indexB == B3_NULL_INDEX ) ? staticSoftness : contactSoftness;
+				soft = b3ContactSoftness( context, contact, soft );
+				if ( soft.massScale == 1.0f ) constraint->rigidJointLanes |= 1u << lane;
 
 				b3Vec3 normal = manifold->normal;
 				( (float*)&constraint->normal.X )[lane] = normal.x;
@@ -1992,7 +2022,7 @@ void b3WarmStartContacts_Convex( b3SolverBlock block, b3StepContext* context )
 	b3TracyCZoneEnd( warm_start_contact );
 }
 
-void b3SolveContacts_Convex( b3SolverBlock block, b3StepContext* context, bool useBias )
+static void b3SolveContactsConvexInternal( b3SolverBlock block, b3StepContext* context, bool useBias, bool refinement )
 {
 	b3TracyCZoneNC( solve_contact, "Solve Contact", b3_colorAliceBlue, true );
 
@@ -2009,6 +2039,16 @@ void b3SolveContacts_Convex( b3SolverBlock block, b3StepContext* context, bool u
 
 		b3BodyStateW bA = b3GatherBodies( states, c->indexA );
 		b3BodyStateW bB = b3GatherBodies( states, c->indexB );
+		b3FloatW refinedLanes = b3ZeroW();
+		if ( refinement )
+		{
+			B3_ASSERT( useBias ); // only normal impulses are refined
+			for ( int lane = 0; lane < B3_SIMD_WIDTH; ++lane )
+			{
+				( (float*)&refinedLanes )[lane] = ( c->rigidJointLanes & ( 1u << lane ) ) != 0 ? 1.0f : 0.0f;
+			}
+			refinedLanes = b3GreaterThanW( refinedLanes, b3ZeroW() );
+		}
 
 		b3FloatW biasRate, massScale, impulseScale;
 		if ( useBias )
@@ -2068,9 +2108,10 @@ void b3SolveContacts_Convex( b3SolverBlock block, b3StepContext* context, bool u
 
 			// Clamp the accumulated impulse
 			b3FloatW newImpulse = b3MaxW( b3SubW( cp->normalImpulses, negImpulse ), b3ZeroW() );
+			if ( refinement ) newImpulse = b3BlendW( cp->normalImpulses, newImpulse, refinedLanes );
 			b3FloatW deltaImpulse = b3SubW( newImpulse, cp->normalImpulses );
 			cp->normalImpulses = newImpulse;
-			cp->totalNormalImpulses = b3AddW( cp->totalNormalImpulses, newImpulse );
+			cp->totalNormalImpulses = b3AddW( cp->totalNormalImpulses, refinement ? deltaImpulse : newImpulse );
 
 			totalNormalImpulse = b3AddW( totalNormalImpulse, newImpulse );
 			totalTwistLimit = b3AddW( totalTwistLimit, b3MulW( cp->leverArms, newImpulse ) );
@@ -2196,6 +2237,11 @@ void b3SolveContacts_Convex( b3SolverBlock block, b3StepContext* context, bool u
 	}
 
 	b3TracyCZoneEnd( solve_contact );
+}
+
+void b3SolveContacts_Convex( b3SolverBlock block, b3StepContext* context, bool useBias )
+{
+	b3SolveContactsConvexInternal( block, context, useBias, false );
 }
 
 void b3ApplyRestitution_Convex( b3SolverBlock block, b3StepContext* context )
@@ -2489,4 +2535,83 @@ void b3StoreImpulses_Overflow( b3StepContext* context )
 	};
 
 	b3StoreImpulses_Mesh( block, context, 0 );
+}
+
+static bool b3ArticulatedPointNeedsCorrection( const b3StepContext* context, const b3BodyState* a,
+	const b3BodyState* b, b3Vec3 rA, b3Vec3 rB, b3Vec3 normal, float baseSeparation, float normalImpulse,
+	float biasRate, bool useBias )
+{
+	b3Vec3 ds = b3Add( b3Sub( b->deltaPosition, a->deltaPosition ),
+		b3Sub( b3RotateVector( b->deltaRotation, rB ), b3RotateVector( a->deltaRotation, rA ) ) );
+	float s = b3Dot( ds, normal ) + baseSeparation;
+	float bias = s > 0.0f ? s * context->inv_h : useBias ?
+		b3MaxFloat( biasRate * s, -context->world->contactSpeed ) : 0.0f;
+	b3Vec3 vA = b3Add( a->linearVelocity, b3Cross( a->angularVelocity, rA ) );
+	b3Vec3 vB = b3Add( b->linearVelocity, b3Cross( b->angularVelocity, rB ) );
+	float error = b3Dot( b3Sub( vB, vA ), normal ) + bias;
+	return error < -0.01f || ( normalImpulse > 0.0f && error > 0.01f );
+}
+
+static b3Vec3 b3ContactVectorLane( const b3Vec3W* v, int lane )
+{
+	return (b3Vec3){ ( (const float*)&v->X )[lane], ( (const float*)&v->Y )[lane], ( (const float*)&v->Z )[lane] };
+}
+
+bool b3SolveArticulatedContacts( b3StepContext* context, bool useBias )
+{
+	bool solved = false;
+	for ( int colorIndex = 0; colorIndex < B3_GRAPH_COLOR_COUNT; ++colorIndex )
+	{
+		b3GraphColor* color = context->graph->colors + colorIndex;
+		for ( int i = 0; i < color->contacts.count; ++i )
+		{
+			b3ContactConstraint* c = color->contactConstraints + i;
+			if ( !c->rigidJointContact ) continue;
+			b3BodyState dummy = b3_identityBodyState;
+			const b3BodyState* a = c->indexA == B3_NULL_INDEX ? &dummy : context->states + c->indexA;
+			const b3BodyState* b = c->indexB == B3_NULL_INDEX ? &dummy : context->states + c->indexB;
+			bool needsCorrection = false;
+			for ( int m = 0; m < c->manifoldCount && !needsCorrection; ++m )
+			{
+				const b3ManifoldConstraint* manifold = c->constraints + m;
+				for ( int p = 0; p < manifold->pointCount; ++p )
+				{
+					const b3ManifoldConstraintPoint* point = manifold->points + p;
+					needsCorrection |= b3ArticulatedPointNeedsCorrection( context, a, b, point->rA, point->rB,
+						manifold->normal, point->baseSeparation, point->normalImpulse, c->softness.biasRate, useBias );
+				}
+			}
+			if ( !needsCorrection ) continue;
+			b3SolverBlock block = { .startIndex = i, .count = 1, .colorIndex = (uint8_t)colorIndex };
+			b3SolveContactsMeshInternal( block, context, useBias, true );
+			solved = true;
+		}
+		for ( int i = 0; colorIndex != B3_OVERFLOW_INDEX && color->convexContacts.count > 0 &&
+			i < color->wideConstraintCount; ++i )
+		{
+			const b3ContactConstraintWide* c = color->wideConstraints + i;
+			if ( c->rigidJointLanes == 0 ) continue;
+			bool needsCorrection = false;
+			b3BodyState dummy = b3_identityBodyState;
+			for ( int lane = 0; lane < B3_SIMD_WIDTH && !needsCorrection; ++lane )
+			{
+				if ( ( c->rigidJointLanes & ( 1u << lane ) ) == 0 ) continue;
+				const b3BodyState* a = c->indexA[lane] == 0 ? &dummy : context->states + c->indexA[lane] - 1;
+				const b3BodyState* b = c->indexB[lane] == 0 ? &dummy : context->states + c->indexB[lane] - 1;
+				for ( int p = 0; p < c->manifolds[lane]->pointCount; ++p )
+				{
+					const b3ContactConstraintPointWide* point = c->points + p;
+					needsCorrection |= b3ArticulatedPointNeedsCorrection( context, a, b,
+						b3ContactVectorLane( &point->anchorAs, lane ), b3ContactVectorLane( &point->anchorBs, lane ),
+						b3ContactVectorLane( &c->normal, lane ), ( (const float*)&point->baseSeparations )[lane],
+						( (const float*)&point->normalImpulses )[lane], ( (const float*)&c->biasRate )[lane], useBias );
+				}
+			}
+			if ( !needsCorrection ) continue;
+			b3SolverBlock block = { .startIndex = i, .count = 1, .colorIndex = (uint8_t)colorIndex };
+			b3SolveContactsConvexInternal( block, context, useBias, true );
+			solved = true;
+		}
+	}
+	return solved;
 }

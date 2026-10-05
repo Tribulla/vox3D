@@ -32,17 +32,17 @@
 
 	<Type Name="b3BodyId">
 		<DisplayString>
-			{b3_worlds[world0].bodies.data[index1-1].name,na},
-			{b3_worlds[world0].bodies.data[index1-1].type}
+			{b3_worlds[world0]->bodies.data[index1-1].name,na},
+			{b3_worlds[world0]->bodies.data[index1-1].type}
 		</DisplayString>
 		<Expand>
-			<ExpandedItem>b3_worlds[ world0 ].bodies.data[index1-1]</ExpandedItem>
+			<ExpandedItem>b3_worlds[ world0 ]->bodies.data[index1-1]</ExpandedItem>
 		</Expand>
 	</Type>
 	
 	<Type Name="b3ShapeId">
 		<DisplayString>
-			{b3_worlds[world0].shapes.data[index1-1].type}
+			{b3_worlds[world0]->shapes.data[index1-1].type}
 		</DisplayString>
 	</Type>
 

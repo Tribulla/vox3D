@@ -34,9 +34,21 @@
 
 _Static_assert( B3_MAX_WORLDS > 0, "must be 1 or more" );
 _Static_assert( B3_MAX_WORLDS < UINT16_MAX, "B3_MAX_WORLDS limit exceeded" );
-b3World b3_worlds[B3_MAX_WORLDS];
+b3World* b3_worlds[B3_MAX_WORLDS];
+static uint16_t b3_worldGenerations[B3_MAX_WORLDS];
+static b3AtomicInt b3_worldRegistryLock;
 b3AtomicInt b3_worldCount;
 int b3_maxWorldCount;
+
+static void b3LockWorldRegistry( void )
+{
+	while ( !b3AtomicCompareExchangeInt( &b3_worldRegistryLock, 0, 1 ) ) {}
+}
+
+static void b3UnlockWorldRegistry( void )
+{
+	b3AtomicStoreInt( &b3_worldRegistryLock, 0 );
+}
 
 const b3HullData* b3AddHullToDatabase( b3World* world, const b3HullData* src )
 {
@@ -92,7 +104,8 @@ void b3RemoveHullFromDatabase( b3World* world, const b3HullData* data )
 b3World* b3GetUnlockedWorldFromId( b3WorldId id )
 {
 	B3_ASSERT( 1 <= id.index1 && id.index1 <= B3_MAX_WORLDS );
-	b3World* world = b3_worlds + ( id.index1 - 1 );
+	b3World* world = b3_worlds[id.index1 - 1];
+	B3_ASSERT( world != NULL );
 	B3_ASSERT( id.index1 == world->worldId + 1 );
 	B3_ASSERT( id.generation == world->generation );
 
@@ -108,7 +121,8 @@ b3World* b3GetUnlockedWorldFromId( b3WorldId id )
 b3World* b3GetWorldFromId( b3WorldId id )
 {
 	B3_ASSERT( 1 <= id.index1 && id.index1 <= B3_MAX_WORLDS );
-	b3World* world = b3_worlds + ( id.index1 - 1 );
+	b3World* world = b3_worlds[id.index1 - 1];
+	B3_ASSERT( world != NULL );
 	B3_ASSERT( id.index1 == world->worldId + 1 );
 	B3_ASSERT( id.generation == world->generation );
 	return world;
@@ -117,7 +131,8 @@ b3World* b3GetWorldFromId( b3WorldId id )
 b3World* b3GetWorld( int index )
 {
 	B3_ASSERT( 0 <= index && index < B3_MAX_WORLDS );
-	b3World* world = b3_worlds + index;
+	b3World* world = b3_worlds[index];
+	B3_ASSERT( world != NULL );
 	B3_ASSERT( world->worldId == index );
 	return world;
 }
@@ -125,7 +140,8 @@ b3World* b3GetWorld( int index )
 b3World* b3GetUnlockedWorld( int index )
 {
 	B3_ASSERT( 0 <= index && index < B3_MAX_WORLDS );
-	b3World* world = b3_worlds + index;
+	b3World* world = b3_worlds[index];
+	B3_ASSERT( world != NULL );
 	B3_ASSERT( world->worldId == index );
 	if ( world->locked )
 	{
@@ -212,9 +228,10 @@ b3WorldId b3CreateWorld( const b3WorldDef* def )
 	B3_ASSERT( B3_MESH_REST_OFFSET < B3_SPECULATIVE_DISTANCE );
 
 	int worldId = B3_NULL_INDEX;
+	b3LockWorldRegistry();
 	for ( int i = 0; i < B3_MAX_WORLDS; ++i )
 	{
-		if ( b3_worlds[i].inUse == false )
+		if ( b3_worlds[i] == NULL )
 		{
 			worldId = i;
 			break;
@@ -223,6 +240,7 @@ b3WorldId b3CreateWorld( const b3WorldDef* def )
 
 	if ( worldId == B3_NULL_INDEX )
 	{
+		b3UnlockWorldRegistry();
 		b3Log( "B3_MAX_WORLDS of %d exceeded!!!", B3_MAX_WORLDS );
 		B3_ASSERT( worldId != B3_NULL_INDEX );
 		return (b3WorldId){ 0 };
@@ -237,14 +255,14 @@ b3WorldId b3CreateWorld( const b3WorldDef* def )
 
 	b3InitializeContactRegisters();
 
-	b3World* world = b3_worlds + worldId;
-	uint16_t revision = world->generation;
-
-	memset( world, 0, sizeof( b3World ) );
+	b3World* world = (b3World*)b3AllocZeroed( sizeof( b3World ) );
+	uint16_t revision = b3_worldGenerations[worldId];
 
 	world->worldId = (uint16_t)worldId;
 	world->generation = revision;
 	world->inUse = true;
+	b3_worlds[worldId] = world;
+	b3UnlockWorldRegistry();
 
 	world->stack = b3CreateStack( 2048 );
 
@@ -526,10 +544,11 @@ void b3DestroyWorld( b3WorldId worldId )
 
 	b3DestroyStack( &world->stack );
 
-	// Wipe world but preserve generation
-	uint16_t generation = world->generation;
-	memset( world, 0, sizeof( b3World ) );
-	world->generation = generation + 1;
+	b3LockWorldRegistry();
+	b3_worldGenerations[worldId.index1 - 1] = world->generation + 1;
+	b3_worlds[worldId.index1 - 1] = NULL;
+	b3Free( world, sizeof( b3World ) );
+	b3UnlockWorldRegistry();
 
 	// b3Log( "Destroyed world %d", worldId.index1 - 1 );
 }
@@ -1883,7 +1902,8 @@ bool b3World_IsValid( b3WorldId id )
 		return false;
 	}
 
-	b3World* world = b3_worlds + ( id.index1 - 1 );
+	b3World* world = b3_worlds[id.index1 - 1];
+	if ( world == NULL ) return false;
 
 	if ( world->worldId != id.index1 - 1 )
 	{
@@ -1902,7 +1922,8 @@ bool b3Body_IsValid( b3BodyId id )
 		return false;
 	}
 
-	b3World* world = b3_worlds + id.world0;
+	b3World* world = b3_worlds[id.world0];
+	if ( world == NULL ) return false;
 	if ( world->worldId != id.world0 )
 	{
 		// world is free
@@ -1940,7 +1961,8 @@ bool b3Shape_IsValid( b3ShapeId id )
 		return false;
 	}
 
-	b3World* world = b3_worlds + id.world0;
+	b3World* world = b3_worlds[id.world0];
+	if ( world == NULL ) return false;
 	if ( world->worldId != id.world0 )
 	{
 		// world is free
@@ -1972,7 +1994,8 @@ bool b3Joint_IsValid( b3JointId id )
 		return false;
 	}
 
-	b3World* world = b3_worlds + id.world0;
+	b3World* world = b3_worlds[id.world0];
+	if ( world == NULL ) return false;
 	if ( world->worldId != id.world0 )
 	{
 		// world is free
@@ -2004,7 +2027,8 @@ bool b3Contact_IsValid( b3ContactId id )
 		return false;
 	}
 
-	b3World* world = b3_worlds + id.world0;
+	b3World* world = b3_worlds[id.world0];
+	if ( world == NULL ) return false;
 	if ( world->worldId != id.world0 )
 	{
 		// world is free
