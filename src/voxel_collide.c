@@ -553,6 +553,122 @@ void b3Voxel_addReduced( const b3VoxelContact* c, b3VoxelContact* acc, int* nacc
 		acc[weakest] = *c;
 }
 
+static inline float b3Voxel_distSq( const b3VoxelContact* a, const b3VoxelContact* b )
+{
+	b3Vec3 diff = b3Sub( a->body0Point, b->body0Point );
+	return b3Dot( diff, diff );
+}
+
+static inline float b3Voxel_scoreFromMinD( const b3VoxelContact* c, float minD )
+{
+	// Matches b3Voxel_spreadScore, including "no other contact" -> 0.
+	if ( minD == FLT_MAX )
+		minD = 0.0f;
+	return c->penetrationDepth * ( 1.0f + sqrtf( minD ) );
+}
+
+// Nearest other kept contact of slot i (minD = FLT_MAX, nearest = -1 if none).
+static void b3VoxelReducer_refresh( b3VoxelReducer* r, int i )
+{
+	float minD = FLT_MAX;
+	int nearest = -1;
+	for ( int j = 0; j < r->count; ++j )
+	{
+		if ( j == i )
+			continue;
+		float d = b3Voxel_distSq( &r->acc[i], &r->acc[j] );
+		if ( d < minD )
+		{
+			minD = d;
+			nearest = j;
+		}
+	}
+	r->minD[i] = minD;
+	r->nearest[i] = nearest;
+	r->score[i] = b3Voxel_scoreFromMinD( &r->acc[i], minD );
+}
+
+void b3VoxelReducer_Init( b3VoxelReducer* r, b3VoxelContact* acc, int capacity )
+{
+	r->acc = acc;
+	r->count = 0;
+	r->capacity = capacity < B3_VOXEL_REDUCER_CAPACITY ? capacity : B3_VOXEL_REDUCER_CAPACITY;
+	r->primed = false;
+}
+
+void b3VoxelReducer_Add( b3VoxelReducer* r, const b3VoxelContact* c )
+{
+	if ( r->capacity < 1 )
+		return;
+	if ( r->count < r->capacity )
+	{
+		r->acc[r->count++] = *c;
+		return;
+	}
+	if ( !r->primed )
+	{
+		for ( int i = 0; i < r->count; ++i )
+			b3VoxelReducer_refresh( r, i );
+		r->primed = true;
+	}
+
+	// newScore: spread of the candidate against every kept contact.
+	float newMin = FLT_MAX;
+	for ( int j = 0; j < r->count; ++j )
+	{
+		float d = b3Voxel_distSq( c, &r->acc[j] );
+		r->dist[j] = d;
+		if ( d < newMin )
+			newMin = d;
+	}
+	float newScore = b3Voxel_scoreFromMinD( c, newMin );
+
+	int weakest = 0;
+	float weakScore = FLT_MAX;
+	for ( int i = 0; i < r->count; ++i )
+	{
+		if ( r->score[i] < weakScore )
+		{
+			weakScore = r->score[i];
+			weakest = i;
+		}
+	}
+	if ( newScore < weakScore )
+		return;
+
+	// Replace the weakest contact and patch the cached neighbour distances.
+	const int w = weakest;
+	r->acc[w] = *c;
+	for ( int i = 0; i < r->count; ++i )
+	{
+		if ( i == w )
+			continue;
+		if ( r->nearest[i] == w )
+		{
+			b3VoxelReducer_refresh( r, i );
+		}
+		else if ( r->dist[i] < r->minD[i] )
+		{
+			r->minD[i] = r->dist[i];
+			r->nearest[i] = w;
+			r->score[i] = b3Voxel_scoreFromMinD( &r->acc[i], r->dist[i] );
+		}
+	}
+	float minD = FLT_MAX;
+	int nearest = -1;
+	for ( int j = 0; j < r->count; ++j )
+	{
+		if ( j != w && r->dist[j] < minD )
+		{
+			minD = r->dist[j];
+			nearest = j;
+		}
+	}
+	r->minD[w] = minD;
+	r->nearest[w] = nearest;
+	r->score[w] = b3Voxel_scoreFromMinD( c, minD );
+}
+
 static uint32_t b3Voxel_cellHash( b3Vec3i c )
 {
 	uint32_t h = (uint32_t)( c.x * 73856093 ) ^ (uint32_t)( c.y * 19349663 ) ^ (uint32_t)( c.z * 83492791 );
@@ -623,7 +739,8 @@ int b3VoxelCollide( const b3VoxelData* v0, b3Transform xf0, const b3VoxelData* v
 	int nc0 = b3Voxel_QueryCells( v0, q0, cells0, cap0 );
 
 	b3VoxelContact acc[B3_VOXEL_MAX_CONTACTS];
-	int nacc = 0;
+	b3VoxelReducer reducer;
+	b3VoxelReducer_Init( &reducer, acc, maxContacts );
 	b3Vec3i cells1[256];
 
 	for ( int a = 0; a < nc0; ++a )
@@ -669,7 +786,7 @@ int b3VoxelCollide( const b3VoxelData* v0, b3Transform xf0, const b3VoxelData* v
 					{
 						c[k].featureId = b3Voxel_pairId( cells0[a], cells1[b], k );
 						c[k].featureId ^= (uint32_t)sub0 * 0x27d4eb2du ^ (uint32_t)sub1 * 0x165667b1u;
-						b3Voxel_addReduced( &c[k], acc, &nacc, maxContacts );
+						b3VoxelReducer_Add( &reducer, &c[k] );
 					}
 				}
 			}
@@ -678,6 +795,7 @@ int b3VoxelCollide( const b3VoxelData* v0, b3Transform xf0, const b3VoxelData* v
 
 	b3Free( cells0, (size_t)cap0 * sizeof( b3Vec3i ) );
 
+	int nacc = reducer.count;
 	b3Voxel_order( acc, nacc );
 	for ( int i = 0; i < nacc; ++i )
 		out[i] = acc[i];

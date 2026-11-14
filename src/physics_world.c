@@ -904,8 +904,7 @@ static void b3Collide( b3StepContext* context )
 		memset( taskContext->manifoldCounts, 0, sizeof( taskContext->manifoldCounts ) );
 	}
 
-	// Task should take at least 40us on a 4GHz CPU (10K cycles)
-	int minRange = 20;
+	int minRange = 1;
 	b3ParallelFor( world, b3CollideTask, contactCount, minRange, context, "collide" );
 
 	b3StackFree( &world->stack, contactIndices );
@@ -1233,8 +1232,8 @@ void b3World_Step( b3WorldId worldId, float timeStep, int subStepCount )
 
 	world->profile.fracture = 0.0f;
 	world->profile.fractureGather = 0.0f;
-	world->profile.fractureAnalyze = 0.0f;
-	world->profile.fractureSever = 0.0f;
+	world->profile.fractureDamage = 0.0f;
+	world->profile.fractureSplit = 0.0f;
 	world->profile.fractureDebris = 0.0f;
 	if ( world->fractureWorld != NULL && timeStep > 0.0f )
 	{

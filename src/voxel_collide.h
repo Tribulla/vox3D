@@ -3,6 +3,8 @@
 #include "box3d/math_functions.h"
 #include "box3d/voxel.h"
 
+#include <stdbool.h>
+
 typedef struct b3VoxelOBB
 {
 	b3Vec3 center;
@@ -31,3 +33,20 @@ int b3VoxelCollide( const b3VoxelData* v0, b3Transform xf0, const b3VoxelData* v
 					int maxContacts, b3VoxelContact* out );
 
 void b3Voxel_addReduced( const b3VoxelContact* c, b3VoxelContact* acc, int* nacc, int maxContacts );
+
+#define B3_VOXEL_REDUCER_CAPACITY 64
+
+typedef struct b3VoxelReducer
+{
+	b3VoxelContact* acc;
+	int count;
+	int capacity;
+	bool primed;
+	float minD[B3_VOXEL_REDUCER_CAPACITY];
+	int nearest[B3_VOXEL_REDUCER_CAPACITY];
+	float score[B3_VOXEL_REDUCER_CAPACITY];
+	float dist[B3_VOXEL_REDUCER_CAPACITY];
+} b3VoxelReducer;
+
+void b3VoxelReducer_Init( b3VoxelReducer* r, b3VoxelContact* acc, int capacity );
+void b3VoxelReducer_Add( b3VoxelReducer* r, const b3VoxelContact* c );

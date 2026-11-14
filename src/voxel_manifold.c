@@ -297,7 +297,8 @@ static int b3VoxelCollideConvex( const b3VoxelData* v, const b3Shape* convex, b3
 	b3Vec3i* cells = (b3Vec3i*)b3Bump( arena, cellCap * (int)sizeof( b3Vec3i ) );
 	int ncells = b3Voxel_QueryCells( v, query, cells, cellCap );
 
-	int nacc = 0;
+	b3VoxelReducer reducer;
+	b3VoxelReducer_Init( &reducer, out, maxContacts );
 	for ( int a = 0; a < ncells; ++a )
 	{
 		b3VoxelSubBox fallback;
@@ -334,7 +335,7 @@ static int b3VoxelCollideConvex( const b3VoxelData* v, const b3Shape* convex, b3
 					break;
 				}
 				default:
-					return nacc;
+					return reducer.count;
 			}
 
 			uint32_t cellId = b3Voxel_cellId( cells[a] );
@@ -351,11 +352,11 @@ static int b3VoxelCollideConvex( const b3VoxelData* v, const b3Shape* convex, b3
 				c.body1Point = m.points[k].point;
 				c.featureId = cellId ^ ( b3MakeFeatureId( m.points[k].pair ) * 2654435761u );
 				c.featureId ^= (uint32_t)sub * 0x27d4eb2du;
-				b3Voxel_addReduced( &c, out, &nacc, maxContacts );
+				b3VoxelReducer_Add( &reducer, &c );
 			}
 		}
 	}
-	return nacc;
+	return reducer.count;
 }
 
 bool b3ComputeVoxelManifolds( b3World* world, int workerIndex, b3Contact* contact, const b3Shape* shapeA, b3WorldTransform xfA,
