@@ -1232,8 +1232,8 @@ void b3World_Step( b3WorldId worldId, float timeStep, int subStepCount )
 
 	world->profile.fracture = 0.0f;
 	world->profile.fractureGather = 0.0f;
-	world->profile.fractureDamage = 0.0f;
-	world->profile.fractureSplit = 0.0f;
+	world->profile.fractureAnalyze = 0.0f;
+	world->profile.fractureSever = 0.0f;
 	world->profile.fractureDebris = 0.0f;
 	if ( world->fractureWorld != NULL && timeStep > 0.0f )
 	{
